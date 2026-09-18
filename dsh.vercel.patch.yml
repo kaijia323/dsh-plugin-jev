@@ -1,0 +1,21 @@
+# Example overlay for the Vercel AI Gateway transport.
+#
+#   export AI_GATEWAY_API_KEY=...        # AI Gateway -> API Keys in your Vercel dashboard
+#   dsh web --patch "$(pwd)/dsh.vercel.patch.yml"
+#
+# Notes:
+#   - The key resolves from $AI_GATEWAY_API_KEY, then $VERCEL_AI_GATEWAY_API_KEY,
+#     then ~/.config/vercel/ai-gateway-key (override with keyFile).
+#   - AI Gateway requires a credit card on file before it serves requests, and
+#     free-tier requests to this model are rate-limited.
+#   - Evaluation models are not exposed on the OpenAI-compatible endpoints; this
+#     plugin calls the gateway evaluation route directly.
+- insert:
+    - id: tool-jev
+      name: './lib/index.js'
+      config:
+        transport: vercel
+        gatewayBaseURL: https://ai-gateway.vercel.sh/v4/ai
+        model: typesafe-ai/jev
+        apiKeyEnv: AI_GATEWAY_API_KEY
+        timeoutMs: 60000

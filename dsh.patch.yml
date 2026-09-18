@@ -1,0 +1,15 @@
+# Example overlay for the native TypeSafe transport.
+#
+# Apply it without touching any profile, from the cloned repository root:
+#   dsh web --patch "$(pwd)/dsh.patch.yml"
+#
+# The key is never written here: it resolves from $TYPESAFE_API_KEY, then
+# $JEV_API_KEY, then ~/.config/typesafe/key (override with keyFile).
+- insert:
+    - id: tool-jev
+      name: './lib/index.js'
+      config:
+        transport: typesafe
+        model: jev-latest
+        apiKeyEnv: TYPESAFE_API_KEY
+        timeoutMs: 60000
