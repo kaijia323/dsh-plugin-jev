@@ -1,0 +1,162 @@
+# dsh-plugin-jev 缺陷修复：契约/文档/健壮性一轮清账
+spec:
+  type: bugfix
+  name: 修复 dsh-plugin-jev 验证中发现的 8 项缺陷与 5 项风险
+  id: bugfix-jev-plugin-defects
+  version: 2
+  updated: "2026-09-18"
+  status: done
+  related:
+    - "reports/final-verification.md"
+    - "reports/static-contract.md"
+    - "reports/live-provider.md"
+    - "specs/research-jev-plugin-verification.yaml"
+
+  context: >-
+    上一轮 research SPEC（specs/research-jev-plugin-verification.yaml）已判定插件实现有效，
+    并沉淀出 reports/final-verification.md 的 8 项缺陷与 5 项风险清单。本轮把这些清单变成可验收的修复：
+    用户明确要求「处理风险，修复发现的问题」，因此修复范围包含代码缺陷、文档与打包偏差，
+    以及对瞬时超时/免费额度两项操作性风险的可操作化处置。基线证据已全部落盘，可直接用于
+    「修复前失败、修复后通过」的对照。
+
+  assumptions:
+    - "真实网关响应形状（choice/score/boolean + probabilities）以 reports/live-provider.md 的原文为准，本轮不改协议。"
+    - "原生 TypeSafe 传输仍无密钥，无法实测；本轮只保证 mock 覆盖与文档诚实，不声称已实测。"
+    - "profile patch 变更会作用于所有 web 会话，属可回滚的一行配置。"
+    - "「有效」的验收口径沿用 research SPEC：注册层 + 契约层 + 至少一次真实/可定位调用。"
+
+  blocking_questions: []
+  open_questions:
+    - "已处置：profile patch 的 tool-jev insert 已加 retries: 1（lead），1/5 瞬时超时的操作性缓解已交付。"
+    - "待用户决策：运行中的 dsh web 进程（22:53:47 启动）仍加载修复前的旧模块；D3/D4/D6/D7/F6/F8 的新行为需重启 dsh web 才在会话内生效。lead 已用 criteria:null 探针独立确认（旧代码把 null 转发给提供方并收到 HTTP 400）。"
+    - "免费额度恢复窗口（小时/日）仍未测；verifier 的单次真实调用已恢复 200，说明窗口会自愈但时长未知。"
+    - "是否把插件从 file URL 行升级为正式安装的 bundle，留给用户决定，不在本轮范围。"
+
+  symptom: >-
+    dsh-plugin-jev 功能本体有效（真实调用 4/5 成功、注册与契约均通过），但验证阶段查到 8 项缺陷：
+    工具描述与真实网关响应不一致（yes/no 读 .noul 得 undefined）、无密钥错误文案自重复、
+    criteria 形状不校验、调用方取消被误报为超时、output.schema 对响应形状零校验、
+    README 声称的 2 项测试根本不存在、npm pack 漏发 vercel overlay、
+    以及 5 项未覆盖风险（瞬时 60s 超时、免费额度 429、并发未测、engines 下限偏宽、原生传输未实测）。
+
+  environment: >-
+    DSH 0.1.6-alpha.2（web profile，patchReload: live）；插件以 file URL 行挂在
+    ~/.dsh/profiles/web/cordis.patch.yml；transport=vercel、model=typesafe-ai/jev、
+    keyFile=~/.config/vercel/ai-gateway-key；Node v24.21.0；仓库 git a9f10d4。
+
+  reproduction:
+    steps:
+      - "D2：`apply(ctx,{transport:'vercel',keyFile:'/nonexistent/key'})` 后调用 execute，观察无密钥文案。"
+      - "D4：调用 execute 时传 `questions.q.criteria = null` 或字符串，观察是否被拒绝。"
+      - "D6：给 execute 传一个已 abort 的 AbortController.signal，观察错误文案。"
+      - "D7：让 mock 端点返回 `{}` 或数组，观察工具是否报成功。"
+      - "D1：`grep -rnE 'spawn|child_process|dump-config|headless' test/`，确认 README 声称的第 5/6 项测试不存在。"
+      - "D5：`npm pack --dry-run --json`，检查产物是否含 dsh.vercel.patch.yml。"
+    expected: >-
+      描述与真实响应一致；无密钥文案不重复；criteria 形状按 README 校验；
+      取消与超时文案可区分；空/畸形响应被拒；README 只声称真实存在的测试；
+      pack 产物含两个 overlay。
+    actual: >-
+      `Set $AI_GATEWAY_API_KEY (or $AI_GATEWAY_API_KEY)`；criteria:null 被原样转发；
+      预中止 signal 报 `timed out after 60000 ms`；`output.schema` 仅 `{type:'object'}`；
+      test/ 内无任何 headless/dump-config 调用方，mock-typesafe.mjs 无调用方；
+      pack 产物缺 dsh.vercel.patch.yml。
+
+  evidence:
+    - "D2 原始输出：`MSG: tool-jev: no API key. Set $AI_GATEWAY_API_KEY (or $AI_GATEWAY_API_KEY), or write the key to /nonexistent/key.`（lead 探针，reports/final-verification.md 第三节）"
+    - "D3：工具描述 lib/index.js:320 写 answers[key].noul；真实响应为 `{\"urgent\":{\"type\":\"boolean\",\"probability\":0.83}}`（reports/live-provider.md:94-98）"
+    - "D4：`PROBE criteria:null -> ACCEPTED (request sent)`（reports/static-contract.md:194）"
+    - "D6：`预中止 signal -> ERROR: tool-jev: request to … timed out after 60000 ms`（reports/static-contract.md:214）"
+    - "D1：README L117-126 声称 5 类覆盖；lead 复跑 `grep -rnE 'spawn|child_process|dump-config|headless|mock-typesafe' test/` 无命中"
+    - "D5：`npm pack --dry-run --json` 产物 = LICENSE/README.md/dsh.patch.yml/lib/index.js/package.json"
+    - "风险 R：live 5 次调用 4 次 200、1 次 60s 超时；lead 随后 4 次调用全部 HTTP 429（free tier rate-limited）"
+    - "基线复现命令（修复前必须留档，修复后必须翻转）：node test/smoke.mjs exit=0/36 PASS/0 FAIL"
+
+  scope:
+    in_scope:
+      - "lib/index.js：D2/D3/D4/D6/D7 + 有限重试 + isConcurrencySafe + 429 可操作提示"
+      - "test/smoke.mjs：为每项修复补回归用例 + 并发用例"
+      - "test/mock-typesafe.mjs：从死代码变为被测试的 fixture"
+      - "新增 test/loader-overlay.mjs：真实 dsh --dump-config 集成测试（opt-in）"
+      - "package.json：files 补 dsh.vercel.patch.yml、engines 收紧到 >=20.3、补 test 脚本"
+      - "README.md：验证节改为只声称真实覆盖、补配置字段与边界说明"
+      - "~/.dsh/profiles/web/cordis.patch.yml：为该挂载开启 retries: 1"
+    not_affected:
+      - "工具的对外契约：仍叫 jev_decide、仍只吃 {state, questions, model?}、仍返回提供方响应体"
+      - "传输协议：URL、请求头、body 组装不变（除重试与错误文案）"
+      - "密钥策略：密钥仍只从 env/keyFile 解析，绝不进入工具参数或对话记录"
+      - "不引入任何运行时依赖（仍为零依赖）"
+
+  root_cause:
+    hypothesis: >-
+      8 项缺陷同源：实现先于文档写成，文档按“打算做的”写而测试只覆盖了 mock 快乐路径。
+      D2 是缺省 apiKeyEnv 与硬编码回退名撞名；D4/D6/D7 是本地校验只做存在性检查、
+      在类型与失败语义上留白；D1/D5 是文档与打包清单未随实现收敛。
+    confirmed: true
+
+  fix:
+    approach: >-
+      按“代码 → 测试 → 文档”顺序收敛，且**每项修复都必须留一条修复前失败、修复后通过的回归用例**：
+      F1(D2) 密钥提示去重并从回退列表动态生成；F2(D3) 工具描述改为按传输描述返回值
+      （网关 boolean→.probability、原生 noul→.noul，并说明 boolean 无 confidence）；
+      F3(D4) criteria 形状校验：choice 必须是含 >=1 键的非数组对象，score 必须是非空数组；
+      F4(D6) 先判 exec.signal.aborted -> 抛 name='AbortError' 的“caller aborted”，
+      其余 AbortError/TimeoutError 才归为超时；
+      F5(D7) output.schema 收紧为 required:['answers'] + answers 为 object；
+      F6 新增 retries（默认 0，仅对超时/网络/5xx 重试，4xx 永不重试，退避 500ms*attempt），
+      toolTimeoutMs 缺省改为 timeoutMs*(retries+1)+5000；并在 profile patch 开 retries: 1 ，
+      以处置观测到的 1/5 瞬时超时；
+      F7 429 错误追加可操作提示（免费额度限流 -> 重试后仍失败需付费额度）；
+      F8 声明 isConcurrencySafe: () => true（无共享可变状态的纯 HTTP 调用）；
+      F9(D1) README 验证节改为逐条对应真实测试，并把 mock-typesafe.mjs 变成被测试的 fixture；
+      F10(D5/D8) package.json files/engines/scripts 与 README 配置表、边界节同步更新。
+
+  regression_tests:
+    - "test/smoke.mjs：无密钥文案在 vercel 缺省下不含重复变量名（D2）"
+    - "test/smoke.mjs：criteria 为 null/数组/字符串时 choice 被拒；score 传对象被拒；合法形状仍通过（D4）"
+    - "test/smoke.mjs：已 abort 的 signal 报 'aborted by the caller'，慢响应报 'timed out'（D6）"
+    - "test/smoke.mjs：mock 返回 {} 或数组时，注册表按 output.schema 拒绝（D7）"
+    - "test/smoke.mjs：retries=1 时对 5xx/超时重试一次且总请求数=2；对 429/400 不重试（F6）"
+    - "test/smoke.mjs：并发两次 execute（不同 state）各自拿到对应响应，无串扰（F8）"
+    - "test/fixture-check.mjs（新）：spawn test/mock-typesafe.mjs，两条路由返回 sentinel 且日志记录了 auth/ai-model-id（D1）"
+    - "test/loader-overlay.mjs（新，opt-in）：`dsh --profile web --patch ./dsh.patch.yml --dump-config` 输出含 tool-jev 且 name 解析为 file://…/lib/index.js（D1）"
+    - "修复前基线：以上新用例在修复前的实现上必须失败（至少 D2/D4/D6/D7 四项）"
+
+  acceptance_criteria:
+    - "`cd /home/dsh/temp/dsh-plugin-jev && node test/smoke.mjs` 退出码 0，FAIL 计数 0，且 PASS 数 >= 44。"
+    - "vercel 缺省 apiKeyEnv 且无任何密钥时，错误文案中 `$AI_GATEWAY_API_KEY` 只出现 1 次，且列出 `$VERCEL_AI_GATEWAY_API_KEY`。"
+    - "`questions.q = {type:'choice',criteria:null}` 与 `{type:'score',criteria:{}}` 均被本地拒绝且错误文案含 'criteria'，请求数不增加（mock 计数不变）。"
+    - "预中止 signal 的错误文案含 'aborted by the caller' 且不含 'timed out'；50ms 超时用例仍含 'timed out after 50 ms'。"
+    - "mock 返回 `{}` 或 `[]` 时工具结果为错误，错误信息包含 'answers'（required）或 'must be an object'。"
+    - "`retries:1` 下 mock 连续两次 500 时总请求数等于 2 且最终错误含 'HTTP 500'；mock 返回 429 时总请求数等于 1。"
+    - "同一 plugin 实例并发执行 2 次 execute（state 不同），两次各自返回自己 state 对应的 sentinel，无串扰。"
+    - "`node test/fixture-check.mjs` 退出码 0，且 mock-typesafe.mjs 不再是死代码（被脚本 spawn）。"
+    - "`dsh --profile web --patch ./dsh.patch.yml --dump-config` 退出码 0，输出中 tool-jev 行的 name 等于 file:///home/dsh/temp/dsh-plugin-jev/lib/index.js。"
+    - "README「验证」一节逐条对应真实存在的测试文件，不再声称任何仓库内不存在的测试；`grep -n 'headless' README.md` 的命中只出现在手动演练说明或 loader 测试中。"
+    - "`npm pack --dry-run --json` 产物包含 dsh.vercel.patch.yml 与 lib/index.js。"
+    - "package.json engines.node 为 '>=20.3'；lib/index.js 仍不 import 任何 @deepseek-ai 包、package.json 无 dependencies。"
+    - "git diff 只涉及 README.md、package.json、lib/index.js、test/ 与 profile patch，且 lib/index.js 的对外工具名/参数 schema 的 required 仍为 ['state','questions']。"
+
+  failure_handling:
+    - scenario: "重试改变了原「不重试」设计，可能让调用方等待更久"
+      handling: "retries 默认 0（库默认行为不变），仅在 profile patch 显式开 1；且只对超时/网络/5xx 重试，4xx 永不重试；toolTimeoutMs 随 retries 放大，避免被工具级超时先杀掉。"
+    - scenario: "criteria 形状收紧后，历史上传过宽松形状的调用方开始报错"
+      handling: "只收紧到 README 已声明的两种形状（choice=对象、score=数组），并同步把 README 的措辞改为精确描述；错误文案指出期望形状。"
+    - scenario: "output.schema 收紧为 required answers 后，提供方若返回别的信封会直接失败"
+      handling: "这是期望的 fail-loud 行为：宁可报错也不要让模型在静默中读到 undefined；错误信息会带违规详情。若上游确要改信封，改的是 schema 而不是绕过校验。"
+    - scenario: "isConcurrencySafe: true 让并发调用变多，撞上免费额度 429"
+      handling: "429 永不重试，错误里带付费额度提示；并发安全只声明事实（无共享可变状态），不改变 DSH 的调度策略。"
+    - scenario: "改 lib/index.js 后在运行中的 web profile 里未热重载，验证者观察到旧行为"
+      handling: "以 plugin_manager list_plugins 的 fiberPhase 与真实调用结果为准；若为 restart-required，如实报告『需重启 dsh web 才生效』，不得声称已生效。"
+    - scenario: "loader-overlay 测试依赖本机 dsh，CI/异构机器上可能不可用"
+      handling: "该测试独立成 test/loader-overlay.mjs 且不并入 npm test 默认路径；不可用时跳过并打印 SKIP，不让 smoke 套件因此变红。"
+    - scenario: "修复引入回归导致某条原有 PASS 变 FAIL"
+      handling: "立即回退该项修复到 diff 前状态并在报告中标注未修复，不得以删除用例的方式变绿。"
+
+  examples:
+    - input: "vercel 传输、无任何密钥、apiKeyEnv 取缺省值"
+      output: "tool-jev: no API key. Set $AI_GATEWAY_API_KEY or $VERCEL_AI_GATEWAY_API_KEY, or write the key to ~/.config/vercel/ai-gateway-key."
+    - input: "questions={q:{type:'score',instructions:'严重度',criteria:{low:'x'}}}"
+      output: "Error: tool-jev: questions.q.criteria must be an array for a score question"
+    - input: "已 abort 的 exec.signal 传给 execute"
+      output: "Error: tool-jev: call aborted by the caller"

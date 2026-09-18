@@ -1,0 +1,112 @@
+# 验证已挂载的 dsh-plugin-jev 到底做什么、是否真的有效
+spec:
+  type: research
+  name: 验证 dsh-plugin-jev（TypeSafe Jev 工具插件）的功能与有效性
+  id: research-jev-plugin-verification
+  version: 2
+  updated: "2026-09-18"
+  status: done
+  related:
+    - "/home/dsh/temp/dsh-plugin-jev/README.md"
+    - "/home/dsh/.dsh/profiles/web/cordis.patch.yml"
+
+  question: >-
+    当前 web profile 里挂载的 dsh-plugin-jev 到底提供什么能力，它是否真的有效
+    —— 即：插件行是否激活、工具契约是否合规、真实提供方端点能否返回类型化答案；
+    若无效，失效面具体在哪一层（注册层 / 校验层 / 网络与鉴权层 / 提供方额度层）。
+
+  background: >-
+    工作区 /home/dsh/temp/dsh-plugin-jev 是一个 DSH 工具插件：把 TypeSafe 的 Jev
+    （System One 决策模型，只返回类型化答案与校准置信度，不产出文本）注册为原生工具
+    jev_decide。web profile 的用户 patch 层通过 insert 行挂载了
+    /home/dsh/temp/dsh-plugin-jev/lib/index.js，配置 transport=vercel、
+    gatewayBaseURL=https://ai-gateway.vercel.sh/v4/ai、model=typesafe-ai/jev、
+    keyFile=/home/dsh/.config/vercel/ai-gateway-key。"挂载成功"与"端到端可用"
+    是两件事，本次验证要把两者分开取证。
+
+  context: >-
+    已确认的初始事实：plugin_manager list_plugins 中 include:tool-jev 的
+    moduleName 为 file:///home/dsh/temp/dsh-plugin-jev/lib/index.js，
+    enabled=true、fiberPhase=active、patchId=tool-jev；当前会话工具表包含
+    jev_decide；~/.config/vercel/ai-gateway-key 存在（61 字节，未读取内容）；
+    ~/.config/typesafe/ 不存在（原生 TypeSafe 传输尚未配置密钥）。
+    验证结论（v2）：判定 H1「有效」，落在实现层；但操作性受限 —— live 腿 5 次真实调用
+    4 次 HTTP 200（choice/score/boolean 三种形状齐全，provider 窗口 148-193ms），
+    随后 lead 连续 4 次调用全部 HTTP 429（free tier rate-limited），说明当前免费额度
+    窗口内不可用。静态腿实跑 node test/smoke.mjs exit=0、36 PASS/0 FAIL（lead 复跑一致）。
+
+  assumptions:
+    - 队友与 lead 处于同一 web profile、同一挂载配置，因此拥有同样的 jev_decide。
+    - Vercel AI Gateway 的 evaluation-model 路由属未公开承诺稳定性的内部路由，
+      协议漂移属已知风险而非插件缺陷。
+    - '“有效”的判定下限：注册层激活 + 契约合规 + 真实端点至少成功返回一次类型化答案。'
+    - 不接受把"HTTP 429/欠费/未绑卡"算作插件无效，但必须算作"当前不可用"。
+
+  blocking_questions: []
+  open_questions:
+    - 结论：Vercel 免费额度对本模型确有硬限流 —— 约 5 次成功调用后即持续 429，lead 在
+      22:59-23:01 的 4 次调用全部 429；恢复窗口 >= 2 分钟，长期窗口未测。稳定使用需付费额度。
+    - 结论：原生 TypeSafe 传输（transport=typesafe）无 TYPESAFE_API_KEY，仅由 mock 覆盖，
+      真实端点能力仍未证实。
+    - 待定：是否要把该插件从 profile patch 层升级为正式安装的 bundle（当前非 bundle 安装）。
+
+  hypotheses:
+    - "H1 有效：注册层激活、契约合规、真实端点返回 answers[key] 类型化答案。"
+    - "H2 部分有效：注册与契约都没问题，但真实端点被密钥/额度/限流挡住，当前不可用。"
+    - "H3 无效：注册被拒绝、契约不合 DSH JsonSchemaNode 子集，或工具根本未进入会话工具表。"
+
+  methods:
+    - "静态审计 lib/index.js 的注册契约、配置解析、参数校验与两种传输的请求组装，核对 README 声明。"
+    - "在本机运行自带冒烟测试 node test/smoke.mjs（mock 两端点，不消耗额度），记录退出码与 PASS/FAIL 计数。"
+    - "通过 plugin_manager list_plugins 读取 include:tool-jev 的 enabled / fiberPhase / patchId，判定挂载态。"
+    - "在真实会话中直接调用 jev_decide，覆盖 choice / score / noul(boolean) 三种问句，记录原始响应或原始错误。"
+    - "对失败面做分层归因：区分注册层、本地校验层（state/questions）、鉴权层（401/403）、提供方层（429/5xx）、网络层（超时/不可达）。"
+    - "Lead 独立复核：自己发一次真实调用，或独立复现一条失败路径，不得只转述队友结论。"
+
+  deliverables:
+    - "reports/static-contract.md：静态契约审计 + 冒烟测试结果 + 文档-实现偏差 + 未覆盖风险。"
+    - "reports/live-provider.md：真实调用清单 + 原始响应片段 + 失败面分析 + 可用性结论。"
+    - "本 SPEC 的最终判定：插件做什么（能力边界）+ 是否有效（分层结论）+ 证据索引。"
+
+  decision_criteria:
+    - "全部验收标准通过 -> 判定 H1（有效），可直接依赖 jev_decide。"
+    - "注册层与契约通过、真实端点稳定失败 -> 判定 H2（部分有效），需先解决密钥/额度。"
+    - "注册层或契约层不通过 -> 判定 H3（无效），需改代码而不是改配置。"
+    - "任一关键结论只有单一来源证据 -> 结论降级为'待复核'，不得写入最终判定。"
+
+  timebox: "45 分钟（两个并行队友 + lead 复核）"
+
+  acceptance_criteria:
+    - "`cd /home/dsh/temp/dsh-plugin-jev && node test/smoke.mjs` 退出码为 0，输出中 FAIL 计数为 0；若存在 FAIL，逐条列出失败标签与原文。"
+    - "plugin_manager list_plugins 中 include:tool-jev 的 fiberPhase 等于 active、enabled 等于 true，且 moduleName 指向 file:///home/dsh/temp/dsh-plugin-jev/lib/index.js。"
+    - "lib/index.js 的 parameters（#L326-L345）不含 pattern/format/minimum/maximum 等 DSH 强制 JSON Schema 子集之外的关键字，且 required 覆盖 state 与 questions。"
+    - "至少一次真实 jev_decide 调用返回 JSON，其中 answers[key] 含 type 字段与 choice/probabilities/noul/probability/score 之一，或返回可定位的 HTTP 状态码与响应体片段。"
+    - "失败路径可复现：无密钥时错误文案包含 'no API key'；非法 transport 时构造插件报 'transport must be \"typesafe\" or \"vercel\"'；空 state 报 'state must be a non-empty string'；非法 questions type 报允许集合。"
+    - "每条结论都带证据（命令原文 + 输出片段，或 file:line），且不存在只有单一来源证据的关键结论。"
+    - "真实调用失败时，报告必须给出 HTTP 状态码或错误名，禁止只写'调用失败'或'看起来不行'。"
+
+  failure_handling:
+    - scenario: "Vercel 网关返回 401/403（密钥无效或无权限）"
+      handling: "记录状态码与响应体片段，判定为鉴权层失败；结论列为 H2 的阻塞原因，并给出重新签发 AI Gateway key 的建议，不改插件代码。"
+    - scenario: "Vercel 网关返回 429（免费额度限流）或提示需要绑卡"
+      handling: "记录状态码与响应体片段，判定为提供方额度层失败；结论标注'插件实现有效但当前不可稳定使用'，并给出付费额度或改用原生 TypeSafe 传输的建议。"
+    - scenario: "Vercel evaluation-model 路由返回 404（协议漂移）"
+      handling: "记录状态码与响应体，判定为上游内部路由变更；建议重跑 test/smoke.mjs 并按最新协议修 buildRequest，属已知风险而非新问题。"
+    - scenario: "调用超时或网络不可达"
+      handling: "记录超时毫秒数与错误名（TimeoutError/AbortError），判定为网络层失败；改用 mock 端点验证插件本身，不把网络问题算作插件缺陷。"
+    - scenario: "关键结论只有单一来源证据，或队友结论无法复现"
+      handling: "Lead 独立重跑同一验证；仍无法复现则该结论降级为'待复核'并写入报告未决项，不进入最终判定。"
+    - scenario: "队友不可用或长时间无响应"
+      handling: "Lead 自行完成该腿验证后再给结论；不得以'队友未完成'作为最终答复。"
+    - scenario: "工具不在某成员的工具表中"
+      handling: "如实记录'该成员会话未挂载'，改用 Lead 会话或 mock 路径验证，禁止伪造调用结果。"
+
+  examples:
+    - input: >-
+        jev_decide(state="客户投诉：账单金额与合同不符，要求退款。",
+        questions={"dept":{"type":"choice","instructions":"该工单属于哪个部门","criteria":{"billing":"账单与退款","technical":"产品故障","sales":"售前咨询"}},
+        "urgent":{"type":"noul","instructions":"是否需要 24 小时内人工介入"}})
+      output: >-
+        {"answers":{"dept":{"type":"choice","choice":"billing","probabilities":{"billing":0.84,"technical":0.159,"sales":0.001},"confidence":0.596},"urgent":{"type":"noul","noul":0.999}},"usage":{"input_tokens":312,"output_tokens":48}}
+    - input: "未设置 $AI_GATEWAY_API_KEY 且 keyFile 不存在时调用 jev_decide"
+      output: "工具报错，文案包含 'tool-jev: no API key. Set $AI_GATEWAY_API_KEY (or $AI_GATEWAY_API_KEY)...'"
