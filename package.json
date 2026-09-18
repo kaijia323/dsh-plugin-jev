@@ -11,10 +11,11 @@
   "files": [
     "lib",
     "README.md",
-    "dsh.patch.yml"
+    "dsh.patch.yml",
+    "dsh.vercel.patch.yml"
   ],
   "engines": {
-    "node": ">=20"
+    "node": ">=20.3"
   },
   "license": "MIT",
   "keywords": [
@@ -25,6 +26,8 @@
     "system-one"
   ],
   "scripts": {
-    "test": "node test/smoke.mjs"
+    "test": "node test/smoke.mjs",
+    "test:loader": "node test/loader-overlay.mjs",
+    "test:fixture": "node test/fixture-check.mjs"
   }
 }

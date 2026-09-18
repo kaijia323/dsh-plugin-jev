@@ -1,8 +1,12 @@
 /**
  * Smoke test for dsh-plugin-jev: registers the tool against a mock ctx and
  * executes it against mock TypeSafe and mock Vercel AI Gateway endpoints,
- * covering both transports, key resolution, and the error paths. No DSH
- * process and no real API key required.
+ * covering both transports, key resolution, validation, cancellation, response
+ * envelopes, retries, and concurrency. No DSH process and no real API key
+ * required.
+ *
+ * Every request is recorded in `requestLog` (never a single last-request
+ * global) so assertions stay correct under concurrent executes.
  *
  * Run: node test/smoke.mjs
  */
@@ -32,6 +36,16 @@ async function expectError(label, fn, expectedSubstring) {
   }
 }
 
+/** Run fn and return the thrown Error (or null when it succeeded). */
+async function captureError(fn) {
+  try {
+    await fn();
+    return null;
+  } catch (error) {
+    return error instanceof Error ? error : new Error(String(error));
+  }
+}
+
 const CANNED = {
   model: 'jev-latest',
   answers: {
@@ -55,11 +69,8 @@ const GATEWAY_CANNED = {
   warnings: [],
 };
 
-let lastBody = null;
-let lastAuth = null;
-let lastGatewayHeaders = null;
-let lastGatewayBody = null;
-let calls = 0;
+/** Per-request log: { url, method, headers, body }. */
+const requestLog = [];
 const server = createServer((req, res) => {
   let raw = '';
   req.on('data', (chunk) => {
@@ -72,34 +83,99 @@ const server = createServer((req, res) => {
     } catch {
       parsed = null;
     }
+    requestLog.push({ url: req.url, method: req.method, headers: req.headers, body: parsed });
+
+    const send = (status, payload, delayMs = 0) => {
+      const write = () => {
+        const isJson = status === 200;
+        res
+          .writeHead(status, { 'content-type': isJson ? 'application/json' : 'text/plain' })
+          .end(isJson ? JSON.stringify(payload) : String(payload));
+      };
+      if (delayMs > 0) setTimeout(write, delayMs);
+      else write();
+    };
+
     if (req.method === 'POST' && req.url === '/v1/systemone') {
-      calls += 1;
-      lastAuth = req.headers.authorization;
-      lastBody = parsed;
-      if (parsed && parsed.state === 'FAIL') {
-        res.writeHead(401, { 'content-type': 'text/plain' }).end('invalid api key');
+      const state = parsed && parsed.state;
+      if (state === 'FAIL') {
+        send(401, 'invalid api key');
         return;
       }
-      res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(CANNED));
+      if (typeof state === 'string' && state.startsWith('HTTP500')) {
+        send(500, 'upstream boom');
+        return;
+      }
+      if (state === 'HTTP429') {
+        send(429, 'rate limited');
+        return;
+      }
+      if (state === 'EMPTYOBJ') {
+        send(200, {});
+        return;
+      }
+      if (state === 'EMPTYARR') {
+        send(200, []);
+        return;
+      }
+      if (state === 'SLOW') {
+        send(200, CANNED, 400);
+        return;
+      }
+      if (state === 'SLOWRETRY') {
+        send(200, CANNED, 400);
+        return;
+      }
+      if (state === 'CONC-A') {
+        send(200, { answers: { dept: { type: 'choice', choice: 'CONC-A' } } }, 120);
+        return;
+      }
+      if (state === 'CONC-B') {
+        send(200, { answers: { dept: { type: 'choice', choice: 'CONC-B' } } }, 10);
+        return;
+      }
+      send(200, CANNED);
       return;
     }
     if (req.method === 'POST' && req.url === '/gateway/evaluation-model') {
-      calls += 1;
-      lastGatewayHeaders = req.headers;
-      lastGatewayBody = parsed;
-      res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(GATEWAY_CANNED));
+      send(200, GATEWAY_CANNED);
       return;
     }
-    res.writeHead(404, { 'content-type': 'text/plain' }).end('not found');
+    send(404, 'not found');
   });
 });
 await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
 const baseURL = 'http://127.0.0.1:' + server.address().port;
 
+const nativeRequests = () => requestLog.filter((entry) => entry.url === '/v1/systemone');
+const gatewayRequests = () => requestLog.filter((entry) => entry.url === '/gateway/evaluation-model');
+const lastNative = () => nativeRequests().at(-1) ?? { headers: {}, body: null };
+const lastGateway = () => gatewayRequests().at(-1) ?? { headers: {}, body: null };
+const callsWithState = (state) => nativeRequests().filter((entry) => entry.body && entry.body.state === state).length;
+
 function register(config) {
   const registered = [];
   apply({ tools: { register: (definition) => { registered.push(definition); return () => {}; } } }, config);
   return registered;
+}
+
+/** Minimal validator mirroring what the registry does with output.schema. */
+function outputSchemaViolation(value) {
+  const schema = tool.output.schema;
+  if (schema.type === 'object' && (value === null || typeof value !== 'object' || Array.isArray(value))) {
+    return 'value must be an object';
+  }
+  for (const key of schema.required ?? []) {
+    if (!Object.prototype.hasOwnProperty.call(value, key)) return 'missing required "' + key + '"';
+  }
+  const answers = schema.properties?.answers;
+  if (answers && answers.type === 'object') {
+    const inner = value.answers;
+    if (inner === null || typeof inner !== 'object' || Array.isArray(inner)) {
+      return 'answers must be an object';
+    }
+  }
+  return null;
 }
 
 process.env.SMOKE_KEY = 'ts_smoke';
@@ -113,6 +189,7 @@ check('declares output.render', typeof tool.output.render === 'function');
 check('declares output.schema object root', tool.output.schema.type === 'object');
 check('declares a positive timeoutMs', typeof tool.timeoutMs === 'number' && tool.timeoutMs > 5000, String(tool.timeoutMs));
 check('parameters require state and questions', Array.isArray(tool.parameters.required) && tool.parameters.required.join(',') === 'state,questions');
+check('declares isConcurrencySafe true (F8)', typeof tool.isConcurrencySafe === 'function' && tool.isConcurrencySafe() === true);
 const rendered = tool.output.render({}, CANNED);
 check('render emits one text block', Array.isArray(rendered) && rendered.length === 1 && rendered[0].type === 'text');
 check('render text carries the answers', rendered[0].text.includes('"choice": "billing"'), rendered[0].text.slice(0, 80));
@@ -127,16 +204,16 @@ const result = await tool.execute(
   { signal: new AbortController().signal },
 );
 check('returns the API body unchanged', JSON.stringify(result) === JSON.stringify(CANNED));
-check('sends the configured bearer token', lastAuth === 'Bearer ts_smoke', String(lastAuth));
-check('uses the configured default model', lastBody.model === 'jev-test', JSON.stringify(lastBody && lastBody.model));
-check('forwards state verbatim', lastBody.state === 'Customer cannot connect Stripe for 3 days');
-check('forwards the question map verbatim', JSON.stringify(lastBody.questions) === JSON.stringify(questions));
+check('sends the configured bearer token', lastNative().headers.authorization === 'Bearer ts_smoke', String(lastNative().headers.authorization));
+check('uses the configured default model', lastNative().body.model === 'jev-test', JSON.stringify(lastNative().body && lastNative().body.model));
+check('forwards state verbatim', lastNative().body.state === 'Customer cannot connect Stripe for 3 days');
+check('forwards the question map verbatim', JSON.stringify(lastNative().body.questions) === JSON.stringify(questions));
 
 await tool.execute({ state: 'x', model: 'jev-latest', questions: { q: { type: 'noul', instructions: 'y?' } } }, {});
-check('honors a per-call model override', lastBody.model === 'jev-latest');
+check('honors a per-call model override', lastNative().body.model === 'jev-latest');
 const defaultTool = register({ baseURL, apiKeyEnv: 'SMOKE_KEY' })[0];
 await defaultTool.execute({ state: 'x', questions: { q: { type: 'noul', instructions: 'y?' } } }, {});
-check('unconfigured model defaults to jev-latest', lastBody.model === 'jev-latest', String(lastBody && lastBody.model));
+check('unconfigured model defaults to jev-latest', lastNative().body.model === 'jev-latest', String(lastNative().body && lastNative().body.model));
 
 // --- vercel transport -----------------------------------------------------
 process.env.GW_KEY = 'gw_smoke';
@@ -159,13 +236,13 @@ const gatewayResult = await gatewayTool.execute(
   { signal: new AbortController().signal },
 );
 check('vercel returns the gateway body unchanged', JSON.stringify(gatewayResult) === JSON.stringify(GATEWAY_CANNED));
-check('vercel sends the gateway bearer token', lastGatewayHeaders.authorization === 'Bearer gw_smoke', String(lastGatewayHeaders.authorization));
-check('vercel defaults to the typesafe-ai/jev model', lastGatewayHeaders['ai-model-id'] === 'typesafe-ai/jev', String(lastGatewayHeaders['ai-model-id']));
-check('vercel sends the protocol version header', lastGatewayHeaders['ai-gateway-protocol-version'] === '0.0.1', String(lastGatewayHeaders['ai-gateway-protocol-version']));
-check('vercel sends the evaluation spec version header', lastGatewayHeaders['ai-evaluation-model-specification-version'] === '4', String(lastGatewayHeaders['ai-evaluation-model-specification-version']));
-check('vercel translates noul to boolean', lastGatewayBody.questions.passed.type === 'boolean', JSON.stringify(lastGatewayBody.questions));
-check('vercel keeps choice criteria', lastGatewayBody.questions.dept.criteria.billing === 'payments');
-check('vercel body has no model field', lastGatewayBody.model === undefined);
+check('vercel sends the gateway bearer token', lastGateway().headers.authorization === 'Bearer gw_smoke', String(lastGateway().headers.authorization));
+check('vercel defaults to the typesafe-ai/jev model', lastGateway().headers['ai-model-id'] === 'typesafe-ai/jev', String(lastGateway().headers['ai-model-id']));
+check('vercel sends the protocol version header', lastGateway().headers['ai-gateway-protocol-version'] === '0.0.1', String(lastGateway().headers['ai-gateway-protocol-version']));
+check('vercel sends the evaluation spec version header', lastGateway().headers['ai-evaluation-model-specification-version'] === '4', String(lastGateway().headers['ai-evaluation-model-specification-version']));
+check('vercel translates noul to boolean', lastGateway().body.questions.passed.type === 'boolean', JSON.stringify(lastGateway().body.questions));
+check('vercel keeps choice criteria', lastGateway().body.questions.dept.criteria.billing === 'payments');
+check('vercel body has no model field', lastGateway().body.model === undefined);
 
 // --- key resolution -------------------------------------------------------
 const dir = await mkdtemp(join(tmpdir(), 'jev-smoke-'));
@@ -173,12 +250,13 @@ const keyFile = join(dir, 'key');
 await writeFile(keyFile, 'ts_from_file\n', 'utf8');
 const fileTool = register({ baseURL, apiKeyEnv: 'NO_SUCH_ENV_VAR', keyFile })[0];
 delete process.env.JEV_API_KEY;
+delete process.env.TYPESAFE_API_KEY;
 await fileTool.execute({ state: 'x', questions: { q: { type: 'noul', instructions: 'y?' } } }, {});
-check('falls back to the key file', lastAuth === 'Bearer ts_from_file', String(lastAuth));
+check('falls back to the key file', lastNative().headers.authorization === 'Bearer ts_from_file', String(lastNative().headers.authorization));
 process.env.JEV_API_KEY = 'ts_from_jev_env';
 const envTool = register({ baseURL, apiKeyEnv: 'NO_SUCH_ENV_VAR', keyFile: '/nonexistent/key' })[0];
 await envTool.execute({ state: 'x', questions: { q: { type: 'noul', instructions: 'y?' } } }, {});
-check('falls back to JEV_API_KEY', lastAuth === 'Bearer ts_from_jev_env', String(lastAuth));
+check('falls back to JEV_API_KEY', lastNative().headers.authorization === 'Bearer ts_from_jev_env', String(lastNative().headers.authorization));
 delete process.env.JEV_API_KEY;
 await rm(dir, { recursive: true, force: true });
 
@@ -245,7 +323,133 @@ await expectError(
   'transport must be',
 );
 
+// --- D4: criteria shape validation ----------------------------------------
+const yQuestion = { q: { type: 'noul', instructions: 'y?' } };
+const beforeCriteria = requestLog.length;
+await expectError(
+  'rejects choice criteria null (D4)',
+  () => tool.execute({ state: 'x', questions: { q: { type: 'choice', instructions: 'y?', criteria: null } } }, {}),
+  'criteria',
+);
+await expectError(
+  'rejects choice criteria as an array (D4)',
+  () => tool.execute({ state: 'x', questions: { q: { type: 'choice', instructions: 'y?', criteria: [] } } }, {}),
+  'criteria',
+);
+await expectError(
+  'rejects choice criteria as a string (D4)',
+  () => tool.execute({ state: 'x', questions: { q: { type: 'choice', instructions: 'y?', criteria: 'x' } } }, {}),
+  'criteria',
+);
+await expectError(
+  'rejects score criteria as an object (D4)',
+  () => tool.execute({ state: 'x', questions: { q: { type: 'score', instructions: 'y?', criteria: { low: 'x' } } } }, {}),
+  'criteria',
+);
+check('criteria failures send no request (D4)', requestLog.length === beforeCriteria, String(requestLog.length - beforeCriteria));
+const legalChoice = await tool.execute(
+  { state: 'x', questions: { q: { type: 'choice', instructions: 'y?', criteria: { a: 'first' } } } },
+  {},
+);
+check('accepts a legal choice criteria object (D4)', JSON.stringify(legalChoice) === JSON.stringify(CANNED));
+const legalScore = await tool.execute(
+  { state: 'x', questions: { q: { type: 'score', instructions: 'y?', criteria: ['low', 'high'] } } },
+  {},
+);
+check('accepts a legal score criteria array (D4)', JSON.stringify(legalScore) === JSON.stringify(CANNED));
+
+// --- D2: missing-key diagnostic de-duplication ----------------------------
+delete process.env.AI_GATEWAY_API_KEY;
+delete process.env.VERCEL_AI_GATEWAY_API_KEY;
+const defaultKeylessGateway = register({
+  transport: 'vercel',
+  gatewayBaseURL: baseURL + '/gateway',
+  keyFile: '/nonexistent/key',
+})[0];
+const missingKeyError = await captureError(() => defaultKeylessGateway.execute({ state: 'x', questions: yQuestion }, {}));
+const missingKeyMessage = missingKeyError ? missingKeyError.message : '<no error>';
+const aiGatewayMentions = missingKeyMessage.split('$AI_GATEWAY_API_KEY').length - 1;
+check('vercel default key message names $AI_GATEWAY_API_KEY exactly once (D2)', aiGatewayMentions === 1, missingKeyMessage);
+check('vercel default key message lists $VERCEL_AI_GATEWAY_API_KEY (D2)', missingKeyMessage.includes('$VERCEL_AI_GATEWAY_API_KEY'), missingKeyMessage);
+
+// --- D6: caller cancellation vs timeout -----------------------------------
+const preAborted = new AbortController();
+preAborted.abort();
+const beforeAbort = requestLog.length;
+const abortError = await captureError(() => tool.execute({ state: 'x', questions: yQuestion }, { signal: preAborted.signal }));
+const abortMessage = abortError ? abortError.message : '<no error>';
+check('reports a pre-aborted signal as caller cancellation (D6)', abortMessage.includes('aborted by the caller'), abortMessage);
+check('pre-abort is not reported as a timeout (D6)', !abortMessage.includes('timed out'), abortMessage);
+check('pre-abort error keeps name AbortError (D6)', abortError !== null && abortError.name === 'AbortError', abortError && abortError.name);
+check('pre-abort sends no request (D6)', requestLog.length === beforeAbort, String(requestLog.length - beforeAbort));
+const slowTool = register({ baseURL, apiKeyEnv: 'SMOKE_KEY', timeoutMs: 50 })[0];
+await expectError(
+  'a caller-independent timeout still reports timed out after 50 ms (D6)',
+  () => slowTool.execute({ state: 'SLOW', questions: yQuestion }, {}),
+  'timed out after 50 ms',
+);
+
+// --- D7: response envelope ------------------------------------------------
+await expectError(
+  'rejects an object response without answers (D7)',
+  () => tool.execute({ state: 'EMPTYOBJ', questions: yQuestion }, {}),
+  'answers',
+);
+await expectError(
+  'rejects an array response (D7)',
+  () => tool.execute({ state: 'EMPTYARR', questions: yQuestion }, {}),
+  'must be an object',
+);
+const objectViolation = outputSchemaViolation({});
+check('output.schema rejects {} at the registry (D7)', objectViolation !== null && objectViolation.includes('answers'), String(objectViolation));
+const arrayViolation = outputSchemaViolation([]);
+check('output.schema rejects an array at the registry (D7)', arrayViolation !== null && arrayViolation.includes('must be an object'), String(arrayViolation));
+check('output.schema still accepts the canned body (D7)', outputSchemaViolation(CANNED) === null, String(outputSchemaViolation(CANNED)));
+
+// --- F6: retries ----------------------------------------------------------
+const retryTool = register({ baseURL, apiKeyEnv: 'SMOKE_KEY', timeoutMs: 5000, retries: 1 })[0];
+await expectError(
+  'retries:1 surfaces HTTP 500 after the attempts are exhausted (F6)',
+  () => retryTool.execute({ state: 'HTTP500', questions: yQuestion }, {}),
+  'HTTP 500',
+);
+check('retries:1 re-sends a 5xx once (F6)', callsWithState('HTTP500') === 2, String(callsWithState('HTTP500')));
+await expectError(
+  'a 429 is surfaced as an error (F6)',
+  () => retryTool.execute({ state: 'HTTP429', questions: yQuestion }, {}),
+  'HTTP 429',
+);
+check('a 429 is never retried (F6)', callsWithState('HTTP429') === 1, String(callsWithState('HTTP429')));
+const noRetryTool = register({ baseURL, apiKeyEnv: 'SMOKE_KEY', timeoutMs: 5000 })[0];
+await expectError(
+  'retries:0 surfaces HTTP 500 immediately (F6)',
+  () => noRetryTool.execute({ state: 'HTTP500R0', questions: yQuestion }, {}),
+  'HTTP 500',
+);
+check('retries:0 never retries a 5xx (F6)', callsWithState('HTTP500R0') === 1, String(callsWithState('HTTP500R0')));
+const retryTimeoutTool = register({ baseURL, apiKeyEnv: 'SMOKE_KEY', timeoutMs: 50, retries: 1 })[0];
+await expectError(
+  'retries:1 surfaces the timeout after retrying (F6)',
+  () => retryTimeoutTool.execute({ state: 'SLOWRETRY', questions: yQuestion }, {}),
+  'timed out after 50 ms',
+);
+check('retries:1 re-sends after a timeout (F6)', callsWithState('SLOWRETRY') === 2, String(callsWithState('SLOWRETRY')));
+
+// --- F8: concurrency on one tool instance ---------------------------------
+const [concurrentA, concurrentB] = await Promise.all([
+  tool.execute({ state: 'CONC-A', questions: yQuestion }, {}),
+  tool.execute({ state: 'CONC-B', questions: yQuestion }, {}),
+]);
+check('concurrent call A receives its own answer (F8)', concurrentA.answers.dept.choice === 'CONC-A', JSON.stringify(concurrentA));
+check('concurrent call B receives its own answer (F8)', concurrentB.answers.dept.choice === 'CONC-B', JSON.stringify(concurrentB));
+const concurrentCalls = nativeRequests().filter((entry) => entry.body && String(entry.body.state).startsWith('CONC-'));
+check(
+  'concurrent calls stayed independent (F8)',
+  concurrentCalls.length === 2 && concurrentCalls.some((entry) => entry.body.state === 'CONC-A') && concurrentCalls.some((entry) => entry.body.state === 'CONC-B'),
+  JSON.stringify(concurrentCalls.map((entry) => entry.body.state)),
+);
+
 server.close();
 console.log('');
-console.log(failures === 0 ? 'SMOKE OK (' + calls + ' mock requests)' : 'SMOKE FAILED: ' + failures + ' check(s)');
+console.log(failures === 0 ? 'SMOKE OK (' + requestLog.length + ' mock requests)' : 'SMOKE FAILED: ' + failures + ' check(s)');
 process.exit(failures === 0 ? 0 : 1);
