@@ -1,0 +1,99 @@
+# 插件收敛为单一官方传输：移除 Vercel AI Gateway
+spec:
+  type: feature
+  name: dsh-plugin-jev 移除 Vercel 传输，只支持官方 TypeSafe API
+  id: feature-jev-official-only
+  version: 2
+  updated: "2026-09-20"
+  status: done
+  related:
+    - "specs/bugfix-jev-plugin-defects.yaml"
+    - "reports/fix-delivery.md"
+
+  goal: >-
+    用户已拿到官方 TypeSafe API key 并在运行时验证通过，决定彻底移除 Vercel AI Gateway 传输：
+    插件只保留官方 TypeSafe API 一条路径，仓库、测试、文档、打包清单里不再有 Vercel 残留；
+    任何仍配置 transport: vercel 的旧配置必须得到明确报错而不是静默降级。
+
+  context: >-
+    官方端点已实测：POST https://api.typesafe.ai/v1/systemone，
+    body {state, questions, model}，model=jev-latest 解析为 jev-1.13.0；
+    返回 {"model":"jev-1.13.0","answers":{...},"usage":{...}}，其中
+    choice 带 probabilities+confidence、noul 带概率、score 带 legend+probabilities+confidence。
+    该形状与插件原生传输的文档一致，且 responses 不被插件改写。
+    运行时挂载已切到 transport: typesafe（~/.dsh/profiles/web/cordis.patch.yml），
+    本会话已用 jev_decide 真实拿到 200 答案。
+
+  assumptions:
+    - "官方 API 的协议（路径、body 里的 model、Bearer 鉴权）以 2026-09-20 的实测为准。"
+    - "Vercel 传输的历史价值由 git 历史与 reports/ 保留，不需要在代码里留活路径。"
+    - "用户接受 transport 键保留为迁移护栏（只允许 typesafe，配 vercel 直接报错）。"
+
+  blocking_questions: []
+  open_questions:
+    - "官方 API 是否有速率/配额限制：本轮共 6 次真实调用（lead 4 次探针/验收 + verifier 2 次 + examples 3 次）均 200，未触发限流，长期配额未知。"
+    - "是否把 file URL 行升级为正式安装的 bundle，仍不在本轮范围。"
+    - "F-V1（留档，lead 判为可接受）：test/smoke.mjs 的反残留负断言位于注册契约区块而非迁移护栏区块，按 AC3 字面算第 4 处命中；它只加强移除结论，不引入任何可用旧路径。"
+    - "F-V2（留档）：task-8 描述的改动范围漏列 examples/ 与 .gitignore，两者实为 SPEC 的 T4 要求，不算越界。"
+    - "F-V3（留档）：SPEC examples 的报错样例措辞与实现不同（实现多一句 transport must be），AC5 只要求含 removed 与 typesafe，README 逐字复制的是真实实现文案。"
+
+  inputs:
+    - "lib/index.js（当前双传输实现）"
+    - "dsh.vercel.patch.yml（待删除）"
+    - "test/smoke.mjs、test/mock-typesafe.mjs、test/fixture-check.mjs"
+    - "README.md、package.json"
+    - "~/.dsh/profiles/web/cordis.patch.yml（已切官方，lead 负责收尾）"
+
+  outputs:
+    format: "单传输插件 + 收敛后的测试与文档"
+    schema:
+      lib_index_js: "只保留 typesafe 路径；transport 非法值报错含 'removed'"
+      deleted_files: ["dsh.vercel.patch.yml"]
+      kept_config: ["transport", "baseURL", "model", "apiKeyEnv", "keyFile", "timeoutMs", "toolTimeoutMs", "retries", "maxStateBytes", "maxQuestions"]
+      removed_config: ["gatewayBaseURL", "gatewayProtocolVersion", "gatewaySpecVersion", "gatewayModel", "vercelKeyFile"]
+      tool_contract: "name=jev_decide，required=['state','questions']，output required=['answers']（不变）"
+
+  constraints:
+    - "零依赖不变：lib/index.js 不得 import @deepseek-ai/*，package.json 不得有 dependencies。"
+    - "密钥仍只从 env/keyFile 解析，绝不进入工具参数或对话记录；不得把 key 写进任何仓库文件。"
+    - "保留上一轮修复的全部行为：criteria 形状校验、abort 与超时区分、信封校验、retries 语义、isConcurrencySafe、429 可操作提示（文案需去掉 AI Gateway 专属措辞）。"
+    - "不重写 reports/ 与 specs/ 里的历史记录（它们是带日期的证据），只在新报告里记录本轮变更。"
+    - "对外工具名、参数 schema、参数顺序不得变化。"
+
+  steps:
+    - "T1：改 lib/index.js 为单传输，改 package.json，删除 dsh.vercel.patch.yml。"
+    - "T2（依赖 T1）：收敛 test/** 与 README.md，移除 gateway 用例与章节，补迁移护栏用例。"
+    - "T4（补漏）：examples/route-demo.mjs 与 examples/confidence-routing.md 改接官方 API，.gitignore 删去 ai-gateway-key 行。"
+    - "T3（依赖 T1+T2+T4）：独立验证——Vercel 残留扫描（含 examples/ 与 .gitignore）、三套件、真实官方调用、契约回归。"
+    - "Lead：收尾 profile patch、跑最终验收、写报告、提交推送。"
+
+  acceptance_criteria:
+    - "`node test/smoke.mjs` 退出码 0、FAIL 计数 0、PASS 数 >= 50；且与改动前 67 个 PASS 标签做集合对比：除 gateway/vercel 专属标签外，其余标签一条都不许消失或改名。"
+    - "`node test/fixture-check.mjs` 退出码 0；`node test/loader-overlay.mjs` 退出码 0 或 SKIP。"
+    - "`grep -rniE 'vercel|ai-gateway|evaluation-model|gatewayBaseURL|typesafe-ai/jev|gatewayModel|gatewayProtocolVersion|gatewaySpecVersion|ai-model-id' lib/ test/ package.json dsh.patch.yml README.md examples/ .gitignore` 的命中只允许出现在：lib/index.js 的迁移报错文案、test/smoke.mjs 的迁移护栏用例、README.md 的『为什么移除』说明段；不得有 dsh.vercel.patch.yml 文件。"
+    - "`package.json` 的 files 不含 dsh.vercel.patch.yml，且仓库根目录不存在该文件（`test ! -e dsh.vercel.patch.yml`）。"
+    - "`apply(ctx,{transport:'vercel'})` 抛出错误，文案含 'removed' 且含 'typesafe'；`transport` 缺省或 'typesafe' 正常注册。"
+    - "工具契约不变：注册名 jev_decide、parameters.required=['state','questions']、output.schema.required=['answers']、isConcurrencySafe()===true、timeoutMs 正有限。"
+    - "`noul` 仍是 canonical 问句类型；`boolean` 作为别名被归一化为 `noul` 发到 wire（不因移除 Vercel 而破坏）。"
+    - "一次真实官方调用经插件代码路径返回 HTTP 200，响应含 model 字段（形如 jev-1.13.0）与 answers，且 choices 带 confidence、score 带 legend。"
+    - "官方传输下无密钥时报错列出 $TYPESAFE_API_KEY 与 $JEV_API_KEY，且变量名不重复（去重逻辑保留）。"
+    - "`grep -c '@deepseek-ai' lib/index.js` 为 0；package.json 无 dependencies；engines.node 仍为 >=20.3。"
+    - "lib/index.js 中不存在 `transport === 'vercel'` 分支、`/evaluation-model` 路径与 ai-model-id 头。"
+
+  failure_handling:
+    - scenario: "旧配置仍写 transport: vercel（例如未更新的 profile 或他人机器）"
+      handling: "apply() 直接抛错，文案指明 Vercel 传输已移除、请改用 typesafe 或参考 git 历史；绝不静默改用官方端点（那会用错误的密钥打官方 API）。"
+    - scenario: "官方 API 触发限流（429）"
+      handling: "429 永不重试（沿用 F6 语义），错误保留提供方 body 并给出可操作提示；提示文案不得再提 AI Gateway。"
+    - scenario: "删除 vercel 后某些测试用例失去覆盖对象（如 D2 去重用例原本依赖 vercel 缺省 apiKeyEnv）"
+      handling: "把该回归用显式 `apiKeyEnv: 'JEV_API_KEY'`（与回退名同名）重新构造，保留去重断言，不得删用例。"
+    - scenario: "删除过程中发现官方协议与原生实现有分歧"
+      handling: "以 2026-09-20 的实测响应为准修实现，并在报告中标注分歧点，不得为迁就实现而改文档描述为假。"
+    - scenario: "验证发现残留引用或行为回归"
+      handling: "由写入范围对应的成员修复后重跑；Lead 不在未通过前提交。"
+
+  examples:
+    - input: "apply(ctx, { transport: 'vercel', apiKeyEnv: 'AI_GATEWAY_API_KEY' })"
+      output: "Error: tool-jev: the Vercel AI Gateway transport was removed; only transport \"typesafe\" (the official TypeSafe API) is supported"
+    - input: "apply(ctx, { keyFile: '~/.config/typesafe/key' }) 后 execute({state:'…', questions:{q:{type:'noul',instructions:'…'}}})"
+      output: "{\"model\":\"jev-1.13.0\",\"answers\":{\"q\":{\"type\":\"noul\",\"noul\":0.85}},\"usage\":{\"input_tokens\":399,\"output_tokens\":59}}"
