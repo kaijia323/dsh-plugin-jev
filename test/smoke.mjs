@@ -180,6 +180,12 @@ check('render emits one text block', Array.isArray(rendered) && rendered.length 
 check('render text carries the answers', rendered[0].text.includes('"choice": "billing"'), rendered[0].text.slice(0, 80));
 check('description documents the noul answer field', tool.description.includes('answers[key].noul'), tool.description.slice(0, 120));
 check('description drops the retired .probability spelling', !tool.description.includes('.probability'), tool.description);
+// Trigger policy anchors (SPEC feature-jev-trigger-policy, acceptance criterion "normal path A"):
+// the tool description must read as policy, not as documentation. Verbatim substrings
+// come from outputs.schema(1); do not loosen them to match the implementation.
+for (const anchor of ['When to use', 'Exempt only when', 'Decision moments', 'Budget:']) {
+  check('description carries the policy anchor ' + JSON.stringify(anchor), tool.description.includes(anchor), tool.description.slice(0, 160));
+}
 check(
   'description drops the retired AI Gateway wording',
   !tool.description.toLowerCase().includes('ai gateway'),

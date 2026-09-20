@@ -1,0 +1,185 @@
+# feature —— 让 jev 插件在插件层自己触发（A：工具描述政策化 + B：注册 prompt section）
+#
+# 背景证据（本轮 Lead 实测，2026-09-20）：
+#   1. 会话审计：~/.dsh/sessions 全量 250 个会话中仅 7 个调用过 jev_decide，累计 18 次，
+#      其中 13 次是 3 个手工测试会话；最近 9/20 的 GUI 会话里除 session-fa933020(2 次) 外全为 0。
+#      插件已装、工具可调用 —— 问题是"没人告诉模型什么时候该用它"。
+#   2. lib/index.js:450-463 describeTool() 全文是"能干什么 + 语法 + 返回形状"，
+#      唯一的"何时用"是四条领域白名单（routing / classification / rubric scoring / yes-no）。
+#   3. 本仓库最近 21 个会话中 13 个跑 preset=ptc；核 @deepseek-ai/dsh-tools 的 renderToolsSdk：
+#      它把 schema.description 经 docLines() 渲染成生成式 TS SDK 里的一行 JSDoc —— 描述在 PTC 模式下更不显眼。
+#   4. 插件层可用杠杆（已核契约）：ctx.tools.register / ctx.systemPrompt.section / .context /
+#      ctx.skills.register / ctx.tools.guard / ToolRunContext.deferContext。
+#      本 SPEC 只做 A+B（描述 + 常驻政策 section），C/D/E 明确不在范围内。
+spec:
+  type: feature
+  name: "jev 插件在插件层自我触发：工具描述政策化 + 注册常驻 prompt section"
+  id: feature-jev-trigger-policy
+  version: 2
+  updated: "2026-09-20"
+  status: done
+  related:
+    - "specs/feature-jev-bundle-install.yaml"
+    - "reports/bundle-install-verification.md"
+  goal: >
+    把"什么时候该问 jev"从埋在工具描述里的四条领域白名单，提升为插件自己声明的
+    【默认开 + 四条豁免 + 七个决策时刻 + 预算】政策，并同时挂在两个面上：
+    (A) jev_decide 的工具描述（native 直接可见 / ptc 进生成式 SDK 的 JSDoc）；
+    (B) 插件用 ctx.inject(['systemPrompt']) 注册的常驻 prompt section（全 profile 全局、每个会话可见）。
+    验收的最终判据不是"文字改了"，而是"插件层自身具备触发能力，且不破坏既有零依赖与运行时语义"。
+  context: >
+    触发窄是结构问题而非措辞问题：工具描述被模型当文档读，不当政策读；PTC 模式下它进一步退化为
+    JSDoc 注释；prompt 层级（section/context/skill）里完全没有 jev。本仓库是 DSH 的 host 层 bundle
+    （package.json 声明 dsh.bundle.patch，已装进 web profile 的 bundles 列表），因此插件行注册的
+    prompt section 是对该 profile 全部会话全局生效的 —— 这正是"在插件层触发"的落点。
+    已核实的精确契约（cordis_inspect_query + 安装产物源码）：
+      - ctx.systemPrompt.section({name, order, text, interpolate?, complete?})；
+        text 可为同步函数，但**不可为 async** —— 因此本 SPEC 不做任何 jev 网络调用，section 只放静态政策。
+      - 官方惯用的可选依赖写法（@deepseek-ai/dsh-mcp-resources 同款）：
+          ctx.inject(["systemPrompt"], (inner) => { inner.systemPrompt.section({...}) });
+        注册是挂在调用 fiber 上的 effect，随插件卸载自动释放。
+      - SECTION_ORDERS 中央序位表：MCP_SERVERS = 3100、TOOLS_SDK = 5000、TEAM_POLICY = 600、
+        HARNESS_IDENTITY = -1000。getSectionOrder(name) 取具名序位。
+      - 现有 mcp-resource-servers 的 name 是 kebab、order 取 MCP_SERVERS、interpolate:false、text 以 "## " 开头。
+    设计要点：A 与 B 的文字必须由同一组常量拼装，禁止两处各写一份导致漂移；
+    B 的正文以 A 的政策块为准，只额外加"用 jev_decide 调用"与 PTC 模式下的到达方式一句。
+    完结结论（2026-09-20，status: done）：A+B 均已落地并经独立验证。
+      - A 面 description = 1441 字符（≤1500），四个政策锚点 + 六个既有语法子串全部逐字保留；
+      - B 面 section = 837 字符（≤1200），name=jev-decision-policy、interpolate=false、
+        默认 order = getSectionOrder('MCP_SERVERS')+10 = 3110、无 complete；经 ctx.inject 可选依赖注册；
+      - 代码级：五套测试全绿（smoke 76 / policy-section 41 / loader 3 / fixture 6 / bundle 37），
+        dump-config 与改动前基线逐字 IDENTICAL（id: tool-jev 恰 1 行），零依赖未变；
+      - 运行级（headless profile + --patch 隔离启动，未碰 web host、未重启）：
+        request tools 表中 jev_decide 描述为 1441 字符且锚点齐备，system/message 中逐字出现
+        "## Jev decision policy" —— 证实真实 Cordis 下 ctx.inject(["systemPrompt"], cb) 会 fire。
+        证据：reports/trigger-policy-e2e-runtime.md 与 reports/trigger-policy-verification.md 第三节。
+      - 独立验证发现并已闭合的唯一覆盖缺口：T7 的 M5 型取巧（B 面正文脱钩仍全绿）无断言覆盖；
+        T8 补 test/policy-section.mjs 的 ACX2 四条断言后，该变异体由 37 PASS 变为 3 FAIL（全为 ACX2），
+        且 A 面断言不受影响，证明是独立杀死而非顺带命中（T9 复验）。
+      - **未生效项**：正在服务 127.0.0.1:3080 的 web host 仍是旧 JS —— 按约束未重启，
+        A/B 在该 host 上均记为 restart-required，须由用户重启后才会生效。
+      - C（自适应提醒）、D（不可逆动作硬闸门）、E（插件自带 skill）按 out_of_scope 未做，
+        是否追加待 A+B 在真实聊天里的使用率观测（基线：250 会话 18 次调用）决定。
+  assumptions:
+    - "模型面向文本用英文（本 harness 的工具文档与政策段均为英文），仓库文档 README 保持中文。"
+    - "MCP_SERVERS + 10 的位置是空闲的（3100 与 5000 之间无语义冲突的邻位），可被 config.policySection.order 覆盖。"
+    - "web profile 的用户层裸 `id: tool-jev` 覆盖会整份替换 config；新增的 policySection 字段缺省即视为默认（enabled:true），因此不写也会生效。"
+    - "插件代码改动是否被运行中的 host 热加载未经验证；SPEC 禁止为验证而重启正在服务的 web host。"
+    - "section 与描述都不得触发网络调用，因此不需要 API key 即可验证注册行为。"
+  blocking_questions: []
+  open_questions:
+    - "A+B 上线后需要在真实聊天里做一次使用率观测（对比基线：250 会话 18 次调用），本轮不设阈值，只留基线记录。"
+    - "C（自适应提醒 context）、D（不可逆动作硬闸门）、E（插件自带 skill）是否后续追加，待 A+B 观测结果决定。"
+
+  inputs:
+    - name: "lib/index.js"
+      description: "插件本体：name / inject / apply，当前 525 行，注册 jev_decide。"
+      source: "文件 ~/temp/dsh-plugin-jev/lib/index.js"
+      required: true
+    - name: "policySection 配置"
+      description: "可选新增配置字段 { enabled?: boolean, order?: number }；缺省 enabled=true。"
+      source: "profile 层 cordis.patch.yml 的 id: tool-jev 覆盖，或 dsh.patch.yml overlay"
+      required: false
+    - name: "既有测试套件"
+      description: "test/smoke.mjs（mock 官方端点）、test/loader-overlay.mjs、test/fixture-check.mjs、test/bundle-install.mjs。"
+      source: "文件 test/"
+      required: true
+
+  outputs:
+    format: "改动后的插件包 + 新增/修订的测试 + 更新后的 README 章节"
+    schema: |
+      lib/index.js 新增/修改的对外契约，逐条固定：
+        (1) jev_decide.description 必须包含以下**逐字**子串（作为验收锚点，其余措辞自由）：
+            "When to use"
+            "Default: ask Jev before turning a judgment about meaning, intent, relevance,"
+            "Exempt only when"
+            "Decision moments"
+            "Budget:"
+            "jev_decide"
+        (2) jev_decide.description 必须**保留**既有的语法/返回形状句子：
+            "Question grammar: choice needs"
+            "score needs"
+            "the yes/no primitive is"
+            "answers[key].choice"
+            "answers[key].score"
+            "answers[key].noul"
+        (3) prompt section 注册对象，逐字固定：
+            name:        "jev-decision-policy"
+            interpolate: false
+            order:       ctx.systemPrompt.getSectionOrder("MCP_SERVERS") + 10   # 默认；config.policySection.order 可覆盖
+            text:        以 "## Jev decision policy" 开头的非空字符串，
+                         含字面量 "jev_decide"，含 (1) 中的 "Exempt only when" 与 "Decision moments"，
+                         并含一句说明 PTC 模式下须在 run_code 程序内调用。
+            complete:    不得出现（禁止 true）
+        (4) 注册路径必须是可选依赖：ctx.inject(["systemPrompt"], (inner) => inner.systemPrompt.section({...}))；
+            插件顶层 inject 仍为 ['tools']（不得把 systemPrompt 加进硬依赖）。
+        (5) 不新增任何 npm 依赖（保持零依赖）；不改动 transport/baseURL/model/key 解析、
+            request/response 形状、错误消息、timeout/retries/output.render 语义。
+    path: "lib/index.js（实现）；test/*.mjs（测试）；README.md（文档）"
+
+  constraints:
+    - "零依赖：package.json 的 dependencies 保持为空。"
+    - "不改动 ctx.tools.register 的 name（jev_decide），不做按状态的注册/注销 —— 工具目录抖动会破坏请求缓存稳定性。"
+    - "section/context 的 text 必须同步；禁止在 prompt provider 内做网络请求。"
+    - "section 正文 ≤ 1200 字符；description ≤ 1500 字符（常驻 token 预算）。"
+    - "只改插件包自身的文件；不得修改 ~/.dsh/profiles/web/cordis.patch.yml、cordis.yml 或任何 profile。"
+    - "不得重启正在服务 127.0.0.1:3080 的 web host；验证只允许在隔离 profile 或 node 进程内进行。"
+    - "既有四套测试必须全绿，且 dsh --profile web --dump-config 的 id: tool-jev 仍恰好 1 行。"
+  out_of_scope:
+    - "C：ctx.systemPrompt.context 自适应提醒 / ctx.tools.guard 观测式计数。"
+    - "D：不可逆动作硬闸门（git push / rm -rf / publish 前强制咨询）。"
+    - "E：插件自带 skill（ctx.skills.register）。"
+    - "安装官方 typesafe-ai skill。"
+    - "任何 agent preset（standard/ptc/cordis）或 host 组合的改动。"
+    - "按会话用量调参、灰度、A/B 观测面板。"
+  tools:
+    - "node（跑 test/*.mjs）"
+    - "python3 ~/.agents/skills/spec-builder/scripts/validate_spec.py（SPEC 自检）"
+    - "dsh --profile <隔离profile> --dump-config（组合回归）"
+    - "cordis_inspect_query Tool.listTools（活体工具描述核对）"
+
+  steps:
+    - "T1（Lead）：产出并校验本 SPEC；建共享任务、划写范围、派发。"
+    - "T2（impl）：在 lib/index.js 抽出共享政策常量；重写 describeTool() 为【用途→默认开→四条豁免→七个决策时刻→预算→语法与返回形状】；description 压到 ≤1500 字符。"
+    - "T3（impl）：新增 normalizeConfig 的 policySection 校验（enabled: boolean 默认 true；order: 有限数默认 getSectionOrder 需延迟到有 ctx 时求值）；"
+    - "T4（impl）：用 ctx.inject(['systemPrompt'], ...) 注册 name=jev-decision-policy 的 section，order 与 text 按 outputs.schema(3)(4)；enabled=false 时不注册；systemPrompt 始终缺席时插件仍正常注册工具。"
+    - "T5（impl）：更新 README（新增 policySection 字段说明、说明 A/B 两个触发面、保持既有安装章节准确）。"
+    - "T6（tests）：扩展 test/smoke.mjs 或新增 test/policy-section.mjs，覆盖 outputs.schema 的 (1)-(4) 与正常/边界/失败三类路径。"
+    - "T7（verifier，独立）：不写实现文件，独立跑四套测试 + 隔离 profile 的 dump-config 回归 + 活体 Tool.listTools 核对；逐条给出 acceptance_criteria 的通过/失败与证据；发现缺陷回报 Lead 并指明归属 owner。"
+    - "T8（Lead）：终验：核对全部 acceptance_criteria、检查最终 diff 未越界（未动 profile / 未重启 host）、汇总报告。"
+
+  acceptance_criteria:
+    - "【正常·A】node test/smoke.mjs 通过；该测试至少断言 description 含 'When to use'、'Exempt only when'、'Decision moments'、'Budget:' 四个锚点。"
+    - "【正常·B】新增/扩展的测试断言：用假 ctx 走 ctx.inject(['systemPrompt'], cb) 的延迟路径后，section 被以 name='jev-decision-policy'、interpolate=false、order=假 getSectionOrder('MCP_SERVERS')+10、text 以 '## Jev decision policy' 开头且含 'jev_decide' 注册一次，且注册对象不含 complete:true。"
+    - "【边界·长度】description 长度 ≤ 1500 字符、section 正文 ≤ 1200 字符（测试内以 .length 断言）。"
+    - "【边界·序位覆盖】config.policySection.order = -5000 时，section 的 order 恰为 -5000（不再走 MCP_SERVERS+10）。"
+    - "【失败·服务缺席】假 ctx 永不提供 systemPrompt 时，apply() 不抛错，且 tools.register 恰被调用一次（工具照常注册）。"
+    - "【失败·显式关闭】config.policySection.enabled=false 时，tools.register 恰一次，且 systemPrompt.section 零次调用。"
+    - "【失败·非法配置】config.policySection.enabled='yes' 与 config.policySection.order=NaN 两种输入各自抛出以 'tool-jev:' 开头的 Error（测试用 assert.throws 匹配前缀）。"
+    - "【回归·语法保留】description 仍含 'Question grammar: choice needs'、'score needs'、'the yes/no primitive is'、'answers[key].choice'、'answers[key].score'、'answers[key].noul' 六个既有子串。"
+    - "【回归·测试全绿】node test/loader-overlay.mjs、node test/fixture-check.mjs、node test/bundle-install.mjs 三条命令退出码均为 0。"
+    - "【回归·组合不变】dsh --profile web --dump-config 输出中 'id: tool-jev' 恰好出现 1 次，且其 config 键集合与改动前逐字一致（唯一允许的新增是 policySection 未显式书写）。"
+    - "【回归·零依赖】package.json 的 dependencies 字段仍为空对象或不含新增项；lib/index.js 的 import 仍只有 node: 内置模块。"
+    - "【活体·不重启】不改动任何 profile 文件、不重启 host；对运行中的 host 只做只读核对（Tool.listTools），若因未热加载而未生效，必须显式记录为 'restart-required' 而非谎报通过。"
+
+  failure_handling:
+    - scenario: "systemPrompt 服务在本 profile 中不存在"
+      handling: "经 ctx.inject 的可选依赖路径自然降级：A 照常生效，B 静默缺席；不得抛错、不得降级为硬依赖。"
+    - scenario: "getSectionOrder('MCP_SERVERS') 抛错或返回非有限值"
+      handling: "回退到常量 3110 并在 section 未注册时不阻断工具注册；错误只记录在诊断信息里，不冒泡出 apply()。"
+    - scenario: "运行中的 host 未热加载新 JS"
+      handling: "验收判为 restart-required，如实记录；由用户决定何时重启，Agent 不得自行重启 web host。"
+    - scenario: "测试断言与实现措辞冲突"
+      handling: "以 SPEC outputs.schema 的逐字锚点为准；实现方改文字，测试方不得为迁就实现而下调锚点。"
+    - scenario: "新增配置字段破坏了 web profile 用户层裸 id 覆盖的既有语义"
+      handling: "新字段必须是可选且缺省即默认；若发现覆盖后行为变化，回退为不新增配置字段、写死默认序位。"
+
+  examples:
+    - input: "模型在 native 模式下准备从两个实现方案里挑一个，且两个方案都能自洽。"
+      output: >
+        工具目录里 jev_decide 的描述以 'When to use' 开头，明示"默认先问"，并把"多方案选型"列为七个决策时刻之一；
+        模型据此发一次 state=两个方案对比 + questions={fit:{type:'choice',criteria:{a:'…',b:'…'}}} 的调用。
+    - input: "profile 层 cordis.patch.yml 写了 `- id: tool-jev` 且 config 只含 transport/baseURL/model/keyFile/apiKeyEnv/timeoutMs/retries（未提 policySection）。"
+      output: >
+        插件按缺省解析 policySection = { enabled: true, order: getSectionOrder('MCP_SERVERS') + 10 }，
+        如期注册 'jev-decision-policy'；用户无需改任何 profile 文件即获得 B。
