@@ -1,0 +1,136 @@
+# ops 模板 —— 部署、监控、故障处理、变更
+spec:
+  type: ops
+  name: "把本轮改动提交并推送到公开仓库，且证明没有密钥/隐私随之上线"
+  id: ops-public-push-privacy
+  version: 2
+  updated: "2026-09-20"
+  status: ready
+  related:
+    - "https://github.com/kaijia323/dsh-plugin-jev"
+    - "reports/profile-switch-to-bundle.md"
+  goal: >
+    把本轮的 7 个路径（3 改 + 4 新增）提交并 push 到公开仓库 kaijia323/dsh-plugin-jev 的 main 分支，
+    并用可复现的扫描证据证明没有 API key / 凭据 / 隐私内容随之上线；同时把 .gitignore 加固到能挡住
+    后续误提交（密钥、凭据、本地 profile 覆盖层、打包产物、备份文件）。
+  context: >
+    远程 origin = https://github.com/kaijia323/dsh-plugin-jev.git（公开仓库）；本地 main 与 origin/main
+    同处 3465259。待提交：M README.md / M dsh.patch.yml / M package.json / ?? test/bundle-install.mjs /
+    ?? reports/bundle-install-verification.md / ?? reports/profile-switch-to-bundle.md /
+    ?? specs/feature-jev-bundle-install.yaml（外加本轮加固的 M .gitignore）。
+    Lead 首轮扫描结论（脚本 /tmp/privacy-scan.sh，避免把 key 打进对话）：
+    (a) 真实 key（~/.config/typesafe/key，108 字节、mode 600）的字面量**不在工作树、也不在任何历史提交**里；
+    (b) 通用密钥模式在工作树与全历史均 0 命中（此处写法仅为历史记述：当初写成了 `/` 分隔，照抄会匹配拼接字面串产生假阴性；正确口径是正则交替，见 acceptance_criteria）；
+    (c) 无 *.key/*.pem/.env/*credential*/id_rsa/*.tgz/*.log/*.before 等敏感文件；
+    (d) 提交身份为 kaijia323 <kaijia323@users.noreply.github.com>（noreply 邮箱，无个人邮箱泄露）；
+    (e) 绝对路径 ~/... 在**已公开的历史**里本来就存在（5 个报告 + 2 个 SPEC），属既有同类信息，
+        不是本轮新增的泄露类别。
+    已知取舍：新报告含较多本机路径（30+ 处），与既有公开内容同类。**最终决定：脱敏后再发布** ——
+    把待发布文件里的绝对路径统一改成 `~/...`、备份时间戳改成 `<timestamp>`（见 changes 与验收标准）。
+    独立审计轮次（privacy-audit，task-7）结论与后果：
+    (f) 载荷干净：真实 key 在「全历史 / 暂存区 / 工作树」三个粒度 0 命中，`.git` 内全部 72 对象（46 blob）
+        逐字节扫描 0 命中，key 前缀存在性探针最长命中前缀仅 7 字符（排除截断/分片写入）→ 无需 filter-repo；
+    (g) 该轮裁定 **DO-NOT-PUSH**，唯一原因是 .gitignore 第 3、16 行把注释写在规则同一行 → `*.tgz` 与
+        `key` 两条规则整体失效（真实密钥文件名就是 key）；已修复并复验 13 条命中 + 4 条反例；
+    (h) 该轮还指出本 SPEC 原第 98 行的 token 模式命令用 `/` 分隔而非正则交替 `|`，会产生假阴性，
+        已改写为 `|` 交替 —— 审计员的独立口径才是本次证据；
+    (i) 审计报告 reports/privacy-audit.md **刻意不发布**（保留在本机），因此提交后 `git status` 仍会有
+        一个 `?? reports/privacy-audit.md`，这是预期状态而非遗漏。
+  assumptions:
+    - "用户明确要求提交并推送（'提交推送'），因此 push 到 origin/main 属于已授权动作。"
+    - "仓库为公开仓库是用户陈述；审计阶段用 HTTP 探活独立确认，若实为私有则该前提需更正。"
+    - "本轮不重写历史：既有历史里没有 key 字面量，无需 filter-repo。"
+  blocking_questions: []
+  open_questions:
+    - "既有公开历史里那 21 处绝对路径（specs/research-jev-plugin-verification.yaml、specs/bugfix-jev-plugin-defects.yaml 等）是否也要在 HEAD 脱敏？本轮不动它们（改它们会扩大提交集，且旧提交里的原文无法撤回，收益有限）。"
+    - "是否要把包发到 npm registry 以解除 profile 对 ~/temp/dsh-plugin-jev 的 link: 依赖？不在本轮。"
+    - "本机的审计报告 reports/privacy-audit.md 是否要单独作为第二个提交发布？本轮选择不发布（它含较多本机指纹）。"
+
+  target:
+    environment: "本机工作树 ~/temp/dsh-plugin-jev + GitHub 公开仓库 kaijia323/dsh-plugin-jev"
+    service: "git commit + git push origin main（快进），以及 .gitignore 加固"
+    region: "GitHub SaaS（不适用区域概念）"
+
+  changes:
+    - "加固 .gitignore：密钥/凭据、本地 profile 覆盖层（cordis.patch.yml/cordis.yml/.dsh/）、打包产物（*.tgz）、备份（*.before/*.bak）、编辑器与工具输出。修复首版把注释写在规则同一行导致 *.tgz 与 key 两条规则失效的缺陷。"
+    - "脱敏待发布内容：README.md 与两份新报告、两份 SPEC 里的绝对路径改为 ~/...，备份时间戳改为 <timestamp>，并在含引用输出的报告顶部加入脱敏说明。"
+    - "提交 M README.md（方式四 + 四条迁移注意）、M dsh.patch.yml（相对 name 解析注释）、M package.json（dsh.bundle.patch 声明）。"
+    - "提交新增 test/bundle-install.mjs（37 断言独立验证器）、reports/bundle-install-verification.md、reports/profile-switch-to-bundle.md、specs/feature-jev-bundle-install.yaml。"
+    - "push 到 origin/main（要求 fast-forward）。"
+
+  risks:
+    - risk: "真实 API key 或凭据随提交上线（公开仓库，一旦推送可能被抓取）"
+      likelihood: low
+      impact: high
+      mitigation: "提交前对工作树 + 全历史扫 key 字面量与 token 模式；独立审计员用不同方法复核；仓库内只以路径形式引用密钥位置，密钥本体留在 ~/.config/typesafe/key。"
+    - risk: "误提交本机环境信息（绝对路径、profile 布局、备份路径）"
+      likelihood: medium
+      impact: medium
+      mitigation: "记录为已知取舍并写入 open_questions；与既有公开历史同类；用户可要求下一轮脱敏。"
+    - risk: ".gitignore 过宽导致应提交文件被静默忽略"
+      likelihood: medium
+      impact: low
+      mitigation: "用 git check-ignore 对已跟踪文件全量核对（必须为空）；不使用无边界的 *secret* 之类 glob；加 !.env.example 反例。"
+    - risk: "push 期间远端前进导致 non-fast-forward，误用 force push 覆盖他人提交"
+      likelihood: low
+      impact: medium
+      mitigation: "push 前 fetch 并确认 origin/main 是本地祖先；被拒则停手报告，绝不 force push。"
+    - risk: "审计未完成就提交/推送"
+      likelihood: low
+      impact: high
+      mitigation: "用共享任务依赖把 T2（提交推送）排在 T1（独立隐私审计）之后；审计未 sign-off 不执行。"
+
+  rollback:
+    trigger: "提交或推送之后，才发现密钥/凭据/明确隐私内容已上线"
+    steps:
+      - "第一优先：立即在 TypeSafe 后台轮换（作废）泄露的 API key —— 公开仓库可能已被抓取，删除提交不足以补救。"
+      - "git revert <commit> 并 push，作为止血（历史仍留痕）。"
+      - "若需彻底清除：git filter-repo 重写历史 + force push，并通知可能的协作者/克隆者。"
+      - "若本轮改动影响到本机 profile：用 /tmp/jev-switch-<timestamp>/ 的备份恢复 ~/.dsh/profiles/web/{cordis.patch.yml,package.json}。"
+      - "重跑 /tmp/privacy-scan.sh 与 test/bundle-install.mjs 确认恢复后状态。"
+
+  monitoring:
+    - metric: "提交内容里 key 字面量 / 密钥模式命中数"
+      threshold: "必须为 0"
+      window: "提交前扫描一次 + 提交后对 HEAD 再扫一次"
+      action: "非 0 立即停止提交/推送，报命中文件与行号（不回显密钥本体）"
+    - metric: "本地 HEAD 与 origin/main 的 SHA 关系"
+      threshold: "push 后两者相等且 push 前 origin/main 是本地祖先"
+      window: "push 后立即"
+      action: "不相等则 fetch 排查；不得 force push"
+    - metric: "远端仓库可见性（HTTP 状态）"
+      threshold: "公开可达（200），与用户前提一致"
+      window: "审计阶段一次"
+      action: "若 404/私有，先与用户确认前提再决定是否推送"
+
+  acceptance_criteria:
+    - "正常：提交后 `git log --oneline -1` 显示新提交，`git status --porcelain` 只剩刻意不发布的本地审计报告 `?? reports/privacy-audit.md`（其余为空），且 `git rev-parse HEAD` 与 `git rev-parse origin/main` 相等。"
+    - "正常：`git ls-remote origin refs/heads/main` 输出的 SHA 等于本地 HEAD（证明远端确实收到）。"
+    - "正常：对最终 HEAD 执行 `git grep -IF -f ~/.config/typesafe/key HEAD` 无输出；对 HEAD 的 token 模式扫描必须用正则交替 `TYPESAFE_API_KEY=|JEV_API_KEY=|apikey_|sk-|ghp_|gho_|AKIA|-----BEGIN [A-Z ]*PRIVATE KEY-----` 且 0 命中（注意：用 `/` 分隔会匹配拼接字面串造成假阴性，见审计发现 (h)）。"
+    - "边界：`git ls-files` 不含任何 *.key / *.pem / .env* / id_rsa* / *credential* 类文件；且 `git ls-files | git check-ignore --stdin` 输出为空（ignore 规则没有误伤已跟踪文件）。"
+    - "边界：`git show --stat HEAD` 的文件集合与预期 9 个路径完全一致（改：.gitignore、README.md、dsh.patch.yml、package.json；新增：test/bundle-install.mjs、reports/bundle-install-verification.md、reports/profile-switch-to-bundle.md、specs/feature-jev-bundle-install.yaml、specs/ops-public-push-privacy.yaml），不多不少。"
+    - "边界：对以下每类临时文件 `git check-ignore -v` 均能命中并给出 .gitignore 行号：foo.key、.env、cordis.patch.yml、x.tgz、y.log、z.before、node_modules/x、secrets.json、.npmrc；同时 `.env.example`、`README.md`、`dsh.patch.yml`、`lib/index.js` **不**被忽略。"
+    - "边界（脱敏）：**本轮改动的 5 个文件**（README.md、reports/bundle-install-verification.md、reports/profile-switch-to-bundle.md、specs/feature-jev-bundle-install.yaml、specs/ops-public-push-privacy.yaml）的暂存内容里不含本机绝对路径前缀（形如 `/home/<user>/`），检查命令：`git grep --cached -nE '/home/[a-z]+/' -- <上述 5 个路径>` 无输出（用正则口径，判据文本里写的是 /home/<user>/，不会自匹配）；两份含引用输出的报告顶部含脱敏说明行。注意：未改动的历史文件（reports/final-verification.md 等）仍含此类路径，属既有公开内容、不在本轮范围。"
+    - "独立（重新签发）：提交前由 privacy-audit 对**修改后的最终 index** 重新出裁定，报告中给出它审计的 `git write-tree` 指纹，且该指纹与提交时的 index 一致；首轮 8b16bb33… 的裁定在 index 变更后失效。"
+    - "失败：若 push 被拒（non-fast-forward / 认证失败），不得 force push；保留本地提交并报告远端 SHA、差异与确切错误。"
+    - "失败：若任一扫描命中，立即停止提交/推送，报出命中位置并给出轮换步骤，绝不「先推再说」。"
+    - "独立：隐私审计由非提交者执行，报告给出其自己的扫描方法、命令与原始输出；不得只复述 Lead 的结论。"
+    - "历史：对全部既有提交（`git rev-list --all`）扫描 key 字面量无命中，确认无需重写历史。"
+
+  failure_handling:
+    - scenario: "网络不可达或 GitHub 认证失败，push 不成功"
+      handling: "保留本地提交（不 reset），报告确切错误与远端当前 SHA；不重试不绕路；由用户决定后续（可在其终端 push）。"
+    - scenario: "远端在本地提交期间前进，push 被拒为非快进"
+      handling: "不 force push；fetch 后报告两边的提交差异，交由用户选择 rebase 或 merge。"
+    - scenario: "扫描发现真实密钥或凭据"
+      handling: "立即停止；第一优先轮换密钥；随后给 revert/filter-repo 方案；不得继续推送。"
+    - scenario: "审计员指出 .gitignore 有误伤或漏项"
+      handling: "先修 .gitignore，重跑 git check-ignore 全量核对与忽略命中检查，通过后再提交。"
+    - scenario: "GitHub 探活显示仓库并非公开"
+      handling: "暂停推送，向用户确认前提（是否新仓库/改名/私有），确认后再继续。"
+
+  examples:
+    - input: "bash /tmp/privacy-scan.sh"
+      output: "工作树与全历史 key 字面量 (none)；token 模式 (none)；敏感文件 (none)；身份 kaijia323 <...@users.noreply.github.com>"
+    - input: "git push origin main && git ls-remote origin refs/heads/main"
+      output: "本地 HEAD 与远端 main 的 SHA 一致；git status 干净"

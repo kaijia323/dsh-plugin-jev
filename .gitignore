@@ -1,6 +1,57 @@
+# ---- 依赖与构建产物 ----
 node_modules/
-*.log
-.DS_Store
+dist/
+build/
+# npm pack 产物，别把打包文件提交进仓库
+*.tgz
+
+# ---- 密钥与凭据：任何情况下都不入库 ----
 .env
+.env.*
+!.env.example
 *.key
+*.pem
+*.p12
+*.pfx
+*.jks
+id_rsa*
+id_ecdsa*
+id_ed25519*
 typesafe-key
+# 裸密钥文件名（真实密钥就是 ~/.config/typesafe/key 这种形态）
+key
+*credentials*.yaml
+*credentials*.yml
+*.secret
+secrets/
+secrets.json
+.npmrc
+.netrc
+
+# ---- 本地 profile 与覆盖层（含 keyFile 路径和个人配置）----
+cordis.patch.yml
+cordis.yml
+.dsh/
+
+# ---- 日志与临时/备份文件 ----
+*.log
+npm-debug.log*
+pnpm-debug.log*
+*.tmp
+*.temp
+*.before
+*.bak
+*.orig
+*.rej
+*~
+*.swp
+
+# ---- 编辑器与系统 ----
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# ---- 测试与工具的本地输出 ----
+coverage/
+.plugin-manager/

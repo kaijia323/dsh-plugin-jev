@@ -1,0 +1,143 @@
+# feature 模板 —— 新功能 / 行为变更
+spec:
+  type: feature
+  name: "jev 插件支持 bundle 方式安装（dsh plugin add 一步装好）并把安装/使用文档补准确"
+  id: feature-jev-bundle-install
+  version: 3
+  updated: "2026-09-20"
+  status: done
+  related:
+    - "reports/official-switch-delivery.md"
+    - "specs/feature-jev-official-only.yaml"
+  goal: >
+    让 `dsh plugin --profile <name> add <仓库绝对路径>` 一条命令即可安装并激活 jev 插件
+    （包声明 dsh.bundle.patch，plugin-manager 的 reconcile 自动把它选成 profile 层），
+    同时保住仓库 overlay 用法、保住既有四套测试不回归，并把 README 安装章节改写为
+    「照做就能成功」的准确文档。
+  context: >
+    2026-09-20 会话审计（Lead 自查 + 会话日志统计）：插件当前靠
+    ~/.dsh/profiles/web/cordis.patch.yml 里一条绝对路径 insert 行挂载，transport=typesafe，
+    官方端点 https://api.typesafe.ai，密钥 ~/.config/typesafe/key。
+    本仓库 package.json 无 dsh.bundle.patch，因此 `dsh plugin --profile web add <仓库>`
+    只会把它装成普通依赖（plugin-manager 会打印 "declares no dsh.bundle — installed as a
+    plain dependency, not a profile layer"），插件不会因此注册。CLI 侧 dsh plugin 只是把参数
+    转发给 profile 目录里的 pnpm（见 @deepseek-ai/dsh/lib/plugin-DJ-rVHUS.js 的 runPlugin →
+    runPluginCommand），选中 bundle 的逻辑在 plugin-manager 的 reconcile()
+    （lib/types/operations.js，activateNewBundles !== false 时生效）。
+    本轮新证据（Lead 实测）：
+    (a) `dsh plugin --profiles web` 报 `error: required option '--profile <name>' not specified`，
+        README 里写的是正确的单数形式，plural 是用户笔误；
+    (b) patch 里相对的 name 按 patch 文件所在目录解析：把 dsh.patch.yml 放到 /tmp/bt/pkg/ 下，
+        `name: './lib/index.js'` 在 dump-config 里解析为 file:///tmp/bt/pkg/lib/index.js
+        → 说明安装成包后（patch 位于 <profile>/node_modules/dsh-plugin-jev/dsh.patch.yml）
+        同一行会解析到包内 lib/index.js，bundle 化可能只需 package.json 加一行；
+    (c) 同 id 的两条 insert 行（用户层绝对路径 + 新 bundle 层）在 dump-config 里并存，
+        运行期会成为两次 apply/注册 jev_decide，属于必须处理的迁移风险；
+    (d) jev_decide 决策（2026-09-20 本轮真实调用，model=jev-1.13.0）：next_step 置信度 0.27
+        （bundle_conversion 0.52 / readme_patch 0.46），按 confidence-gated routing 属「转人工」，
+        用户已拍板：先修文档，再做 bundle 改造。
+    完结结论（2026-09-20，status: done）：bundle 化只改了 package.json 一处 dsh 字段，dsh.patch.yml
+    一行未动（相对 name 按 patch 文件所在目录解析，已实测）。隔离 profile jevtest 真装
+    （pnpm v12.3.4、link:、481ms、无需联网）后 bundles 含 dsh-plugin-jev、dump-config 恰好 1 行
+    id: tool-jev 且指向该 profile 内包副本；9 条 acceptance_criteria 全部通过（criterion 7 在 T6
+    复核后由「部分通过」升级为通过）。已解决的疑问：(B1) 重复 id 的运行期行为未验证，README 取
+    最保守写法「必须删旧行」；(B2) 相对 name 解析基准 = patch 文件所在目录；(B3) overlay 用法无回归
+    （loader-overlay 3 断言 + dump-config 解析不变）；(B4) reconcile 只识别本次新增依赖（F1），
+    README 已写「已是普通依赖时要先 remove 再 add」。live web profile 仍走方式二，未切换。
+    追加（v3，2026-09-20 晚间）：用户已要求并完成 live web profile 的切换 —— 删掉用户层 insert 行、
+    用 plugin_manager install_bundle 装成本仓库的 bundle 层（返回 application: applied），并在用户层
+    补一条完整 config 覆盖以保住原来的 retries: 1；`dsh --profile web --dump-config` 验证 id: tool-jev
+    恰好 1 行、name 解析到 profile 内包副本、config 与切换前逐字一致；**未重启**，同一运行会话里
+    调用 jev_decide 成功（注册实证）。本轮新发现并已写入 README 方式四注意 4：loader 的裸 `id:`
+    覆盖是整份替换 config（实测只写 retries 会让 baseURL/keyFile/model/apiKeyEnv/timeoutMs 消失）；
+    注意 3 也据实修正为「install_bundle 实时生效 / CLI add 需重启」。变更记录见
+    reports/profile-switch-to-bundle.md。
+  assumptions:
+    - "本机 pnpm 可用；profiles 工作区根已有 @deepseek-ai/* 依赖，隔离 profile 安装可能无需网络。"
+    - "不改 lib/index.js 与插件运行时语义：bundle 化只改包元数据和文档。"
+    - "dsh.patch.yml 继续同时承担「仓库 overlay 示例」与「bundle 层 patch」两个角色。"
+  blocking_questions: []
+  open_questions:
+    - "是否要把包发布到 npm registry？本轮不做（live profile 目前是 link: 安装，仓库移动会打断 profile）。"
+
+  inputs:
+    - name: "仓库 package.json"
+      description: "包元数据；需要新增 dsh.bundle.patch 声明"
+      source: "~/temp/dsh-plugin-jev/package.json"
+      required: true
+    - name: "仓库 dsh.patch.yml"
+      description: "overlay / bundle 层 patch；name 保持相对路径 './lib/index.js'"
+      source: "~/temp/dsh-plugin-jev/dsh.patch.yml"
+      required: true
+    - name: "README.md 安装章节"
+      description: "待改写的安装/使用说明（当前 49-67 行）"
+      source: "~/temp/dsh-plugin-jev/README.md"
+      required: true
+    - name: "既有测试"
+      description: "smoke / fixture-check / loader-overlay 三套自动套件"
+      source: "~/temp/dsh-plugin-jev/test/"
+      required: true
+
+  outputs:
+    format: "仓库文件改动 + 验证报告 + 新增测试"
+    schema: >
+      package.json: 仅新增 "dsh": {"bundle": {"patch": "./dsh.patch.yml"}}；
+      dsh.patch.yml: 仅注释补充（name 值不变）；
+      README.md: 安装章节重写；
+      test/bundle-install.mjs: 新增，退出码 0 表示通过，非 0 表示失败；
+      reports/bundle-install-verification.md: 逐条 acceptance_criteria 的通过/失败+证据。
+    path: "~/temp/dsh-plugin-jev/"
+
+  constraints:
+    - "禁止修改 lib/index.js（正在运行的 web 会话挂载的就是它）。"
+    - "禁止修改 ~/.dsh/profiles/web/**（live profile，改动会热重载并打断当前会话）。"
+    - "dsh.patch.yml 的 name 必须保持 './lib/index.js'（相对路径），不得改成包名字符串，否则 `dsh web --patch $(pwd)/dsh.patch.yml` 的 overlay 用法失效。"
+    - "package.json 只加 dsh 字段；不动 files / exports / main / scripts / dependencies，不新增依赖。"
+    - "隔离验证用的 scratch profile 独立命名（jevtest），验证后清理，不得留下影响 web profile 的状态。"
+    - "不得改动 web profile 已有的 cordis.patch.yml 行；迁移步骤只写进 README 由用户执行。"
+  out_of_scope:
+    - "不把当前 live web profile 切换到 bundle 安装（需重启 dsh web，属用户动作）。"
+    - "不发布到 npm registry，不改版本号之外的发布流程。"
+    - "不改 transport / 密钥解析 / 工具契约 / 配置字段语义。"
+    - "不改 dsh CLI 或 plugin-manager 自身代码。"
+  tools:
+    - "dsh --profile <name> --dump-config"
+    - "dsh plugin --profile <scratch> add|remove"
+    - "node test/*.mjs"
+    - "npm pack"
+    - "plugin_manager (install_bundle / list_bundles) —— 仅在隔离 profile 使用"
+
+  steps:
+    - "T1（Lead）：改写 README 安装章节的稳定部分——`dsh plugin --profile <name> add` 为正确形式、--profiles 的实测报错、add 只装依赖不注册、三种装法对照；补 dsh.patch.yml 注释。"
+    - "T2（bundle-core）：package.json 新增 dsh.bundle.patch 指向 ./dsh.patch.yml。"
+    - "T3（bundle-verify）：独立构建 test/bundle-install.mjs，覆盖 bundleManifest 识别、隔离 profile 真装、overlay 解析、tarball 清单、无回归；产出 reports/bundle-install-verification.md。"
+    - "T4（Lead）：bundle 改造落地后，把 README 安装章节补成「一步装 + 迁移注意（删旧同 id 行）」并跑全部四套件做最终验收。"
+
+  acceptance_criteria:
+    - "正常：在仓库根执行 `dsh plugin --profile jevtest add \"$(pwd)\"` 后，~/.dsh/profiles/jevtest/package.json 的 dsh.profile.bundles 含 dsh-plugin-jev；且 `dsh --profile jevtest --dump-config` 输出里 id: tool-jev 恰好出现一次，name 解析到该 profile 下 node_modules/dsh-plugin-jev/lib/index.js。"
+    - "正常：用 plugin-manager 的真实代码路径验证——对安装后的包名调用 bundleManifest('dsh-plugin-jev', <profileDir>, anchor) 返回非 undefined 且 manifest.dsh.bundle.patch === './dsh.patch.yml'；改造前同一调用返回 undefined。"
+    - "边界：仓库 overlay 用法不变——`dsh --profile web --patch ~/temp/dsh-plugin-jev/dsh.patch.yml --dump-config` 退出码 0，且该行 name 解析为 file://~/temp/dsh-plugin-jev/lib/index.js。"
+    - "边界：`npm pack` 生成的 tarball 内含 dsh.patch.yml、lib/index.js、README.md、package.json 四个条目。"
+    - "失败：把仓库复制到临时目录并删掉 dsh 字段后执行 `dsh plugin --profile jevtest add <副本路径>`，stderr 含 'declares no dsh.bundle' 且 package.json 的 bundles 不新增该包名；仓库本体不得被改动。"
+    - "无回归：node test/smoke.mjs（72 断言）、node test/fixture-check.mjs（6 断言）、node test/loader-overlay.mjs（3 断言）三者退出码均为 0，断言数不变。"
+    - "文档：README 安装章节明确写出（i）正确命令 `dsh plugin --profile <name> add <spec>`、（ii）`--profiles` 实测报错文案 `required option '--profile <name>' not specified`、（iii）add 只装依赖、激活需要 dsh.bundle.patch 或手写 insert 行、（iv）bundle 安装后必须删掉 user layer 里同 id 的绝对路径 insert 行，否则同 id 两行并存。"
+    - "隔离：验证结束后 ~/.dsh/profiles/jevtest 已删除（或报告明确残留路径）；~/.dsh/profiles/web/cordis.patch.yml 与 lib/index.js 的 mtime 与验证前一致。"
+    - "独立：test/bundle-install.mjs 由验证者编写，不得调用被验证者提供的脚本或复制其断言逻辑；报告中每条验收标准附可复现命令与原始输出片段。"
+
+  failure_handling:
+    - scenario: "环境无网络，pnpm 无法为 scratch profile 解析依赖"
+      handling: "降级为离线证据链：直接调用 plugin-manager 的 bundleManifest()/loadOverlayPatches() 对符号链接布局做验证，并在报告中标注「未观察到真实 pnpm 安装」，该条验收记为部分通过而非通过。"
+    - scenario: "pnpm 不可用或 exit 127"
+      handling: "记 SKIP 并明确不算通过；不得用自制脚本冒充安装成功。"
+    - scenario: "隔离 profile 安装后发现 tool-jev 行出现两次"
+      handling: "判定为失败，给出删除 user layer 同 id 行的确切步骤，并要求重跑验证。"
+    - scenario: "npm pack 触发了 prepare/build 脚本或被网络阻断"
+      handling: "改用 `npm pack --ignore-scripts` 复核清单；仍失败则记录原始错误，不视为通过。"
+    - scenario: "验证过程意外改动了 ~/.dsh/profiles/web 或 lib/index.js"
+      handling: "立即停止，报告 diff 与恢复步骤（git checkout lib/index.js / 从备份恢复 patch 行），并要求 Lead 复核。"
+
+  examples:
+    - input: "cd ~/temp/dsh-plugin-jev && dsh plugin --profile jevtest add \"$(pwd)\""
+      output: "pnpm 安装成功；~/.dsh/profiles/jevtest/package.json 的 dsh.profile.bundles 新增 dsh-plugin-jev；`dsh --profile jevtest --dump-config` 出现一行 id: tool-jev，name 指向该 profile 下 node_modules/dsh-plugin-jev/lib/index.js。"
+    - input: "dsh plugin --profiles web"
+      output: "error: required option '--profile <name>' not specified（退出码非 0）；README 需以此为例说明必须用单数 --profile。"

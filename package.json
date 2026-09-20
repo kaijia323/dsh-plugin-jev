@@ -8,6 +8,11 @@
   "exports": {
     ".": "./lib/index.js"
   },
+  "dsh": {
+    "bundle": {
+      "patch": "./dsh.patch.yml"
+    }
+  },
   "files": [
     "lib",
     "README.md",

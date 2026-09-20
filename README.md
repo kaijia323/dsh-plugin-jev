@@ -40,6 +40,7 @@ model=jev-latest 由服务端解析为 jev-1.13.0；单次调用 0.5–0.6s；�
     test/mock-typesafe.mjs   假端点 fixture：由 test/fixture-check.mjs 驱动，也可手动演练
     test/fixture-check.mjs   启动并校验 mock-typesafe.mjs 的 fixture 检查
     test/loader-overlay.mjs  可选集成测试：真实 dsh --dump-config 解析 overlay
+    test/bundle-install.mjs  独立验证器：bundle 层识别、包内相对 name 解析、同 id 两行风险
     LICENSE                  MIT
     .gitignore
 
@@ -47,6 +48,28 @@ model=jev-latest 由服务端解析为 jev-1.13.0；单次调用 0.5–0.6s；�
 （见 package.json 的 files 字段）；test/ 与 examples/ 不随包发布。
 
 ## 安装
+
+前提：`dsh plugin` 只认 `--profile`（单数）且必须显式给；写成复数会直接失败
+（2026-09-20 实测，退出码 1）：
+
+    $ dsh plugin --profiles web
+    error: required option '--profile <name>' not specified
+
+`dsh plugin` 本身只是把剩余参数转发给 profile 目录里的 pnpm：
+
+    dsh plugin --profile <name> <pnpm-args...>   # add <spec> / remove <spec> / why <spec> ...
+
+**关键语义**：`dsh plugin --profile <name> add <spec>` 只负责把包装进 profile 的
+node_modules；它会不会顺带被激活，取决于这个包自己有没有声明 bundle 层：
+
+- 包在 package.json 里声明了 `dsh.bundle.patch`（本仓库自 2026-09-20 起声明为 `./dsh.patch.yml`，
+  见 package.json 的 dsh 字段）：plugin-manager 会把**本次新增**的依赖自动选成 profile 层，
+  插件随之注册。
+- 没声明：只当普通依赖装上，plugin-manager 会打印
+  `dsh: warning: <pkg> declares no dsh.bundle — installed as a plain dependency, not a profile layer`，
+  插件**不会**注册，必须自己再写一条 insert 行（entry 的 name 写包名）。
+
+四种装法：
 
 方式一：不落盘，用 overlay 启动（在克隆下来的仓库根目录执行）
 
@@ -57,14 +80,67 @@ model=jev-latest 由服务端解析为 jev-1.13.0；单次调用 0.5–0.6s；�
 必须是 insert 行：裸的 "id: tool-jev" 只会去覆盖已存在条目并打印警告。
 注意 name 用仓库里的绝对路径，例如 /path/to/dsh-plugin-jev/lib/index.js。
 
-方式三：当包安装进 profile（entry 的 name 写包名）
+方式三：当包安装进 profile
 
     dsh plugin --profile web add /path/to/dsh-plugin-jev
 
-package.json 的 files 已包含 dsh.patch.yml，它会随 `npm pack` 发布，装包后可以直接引用
-包内 overlay 或把 insert 行抄进 profile patch。
+装完要不要再手写 insert 行，按上面「关键语义」判断：包声明了 dsh.bundle.patch 就自动激活，
+否则把 insert 行抄进 profile patch（name 写包名）。
 
-web profile 是 patchReload: live，patch 改动热重载；新增依赖包建议重启一次 dsh web。
+方式四：一条命令装包并激活（推荐；已在隔离 profile jevtest 上独立验证通过）
+
+    同上命令即可：dsh plugin --profile web add /path/to/dsh-plugin-jev
+
+本仓库声明了 dsh.bundle.patch，所以这条命令装完即生效。实测（隔离 profile jevtest，
+pnpm v12.3.4，本地路径按 `link:` 处理，本次 481ms、耗时随环境波动；无需联网——包无依赖，
+pnpm 未发生 fetch）：该 profile 的 dsh.profile.bundles 变为
+`["@deepseek-ai/dsh-base", "dsh-plugin-jev"]`；`dsh --profile jevtest --dump-config` 里
+`id: tool-jev` **恰好一行**，name 解析到
+`~/.dsh/profiles/jevtest/node_modules/dsh-plugin-jev/lib/index.js`，并带 `# == dsh-plugin-jev` 层标记。
+（web 上未重复实测；web 若保留方式二那行就是 2 行，见注意 1。验收细节与原始输出见
+reports/bundle-install-verification.md。）
+
+从方式二（手写 insert 行）迁到方式四，四条注意：
+
+1. **必须先删掉旧行**：删掉 ~/.dsh/profiles/<profile>/cordis.patch.yml 里那条同 id（tool-jev）
+   的 insert 行。否则配置层会出现同 id 两行（实测：user layer 1 行 + bundle 层 1 行 = 2 行）；
+   运行期是否会两次注册 jev_decide 本轮未验证，按最保守处理：必须删旧行。
+2. **已经是普通依赖时要先 remove 再 add**：plugin-manager 的 reconcile 只识别**本次新增**的依赖
+   （源码注释 "without re-enabling retained dependencies"）。若该包名早已作为普通依赖存在，
+   直接 add 不会激活、也不会打印任何警告（实测 bundles 不变、`id: tool-jev` 0 行）；
+   先 `dsh plugin --profile web remove dsh-plugin-jev`，再 add 才会激活。
+3. **要不要重启取决于走哪条安装路径**（2026-09-20 实测）：
+   - `plugin_manager install_bundle`（Harness 内）**实时生效、无需重启**：返回
+     `application: applied` 之后，运行中的会话立刻就能调用 jev_decide（同一会话实测调用成功）。
+   - `dsh plugin --profile <profile> add`（CLI）只把包写进 profile，跑着的进程不会知道多了一个
+     bundle 层，需要重启一次 dsh web。
+4. **在用户层改配置时必须重写整份 config**：loader 的裸 `id:` 覆盖是**整份替换**，不是字段合并。
+   实测：只写 `- id: tool-jev` + `config: {retries: 5}`，该行的 baseURL / keyFile / model /
+   apiKeyEnv / timeoutMs 全部消失，只剩 retries。bundle 层的 dsh.patch.yml 只设了
+   transport / model / apiKeyEnv / timeoutMs（其余走插件默认值），所以如果你原来在旧 insert 行里
+   写过别的值（例如 `retries: 1`，而插件默认是 0），装完 bundle 后要把它连同完整 config 抄进用户层：
+
+       - id: tool-jev
+         config:
+           transport: typesafe
+           baseURL: https://api.typesafe.ai
+           model: jev-latest
+           keyFile: ~/.config/typesafe/key
+           apiKeyEnv: TYPESAFE_API_KEY
+           timeoutMs: 60000
+           retries: 1
+
+另注：`dsh --dump-config` 会把 <profile>/cordis.yml 重写为规范空根（prepareProfile 的既有行为），
+因此那个文件的 mtime 必然变化、内容恒定；cordis.patch.yml 与仓库文件不受影响。
+
+package.json 的 files 已包含 dsh.patch.yml，它会随 `npm pack` 发布。patch 里 name 写的是相对路径
+`./lib/index.js`，而相对 name 按 **patch 文件所在目录**解析（2026-09-20 实测：patch 放在
+/tmp/bt/pkg/ 下时解析为 file:///tmp/bt/pkg/lib/index.js），所以同一个文件既能当仓库 overlay
+（解析到 <仓库>/lib/index.js），也能当安装在包里的 bundle patch（解析到
+node_modules/dsh-plugin-jev/lib/index.js）。
+
+web profile 是 patchReload: live，patch 改动热重载；bundle 层与新增依赖包建议重启一次
+dsh web（同方式四注意 3）。
 
 ## 配置
 
@@ -157,9 +233,12 @@ undefined 交给模型。
     node test/smoke.mjs           # 72 项断言，mock 官方端点
     node test/fixture-check.mjs   # 6 项断言：spawn test/mock-typesafe.mjs 并校验它
 
-加载器集成测试（可选，需要本机 dsh；环境没有 dsh 时打印 SKIP 并以 0 退出）：
+需要本机 dsh 的集成测试（`loader-overlay.mjs` 在没有 dsh 时打印 SKIP 并以 0 退出；
+`bundle-install.mjs` 需要 dsh，没有 dsh 时判 FAIL 并以 1 退出——不把「验证不到」当通过）：
 
-    node test/loader-overlay.mjs  # 3 项断言
+    node test/loader-overlay.mjs   # 3 项断言
+    node test/bundle-install.mjs   # 37 项断言（正常环境）：bundleManifest 真实代码路径、包安装布局下
+                                   # 相对 name 解析、同 id 两行风险、仓库文件未被改动（零网络、零第三方依赖）
 
 smoke.mjs 覆盖内容：
 

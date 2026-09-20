@@ -5,6 +5,11 @@
 #
 # The key is never written here: it resolves from $TYPESAFE_API_KEY, then
 # $JEV_API_KEY, then ~/.config/typesafe/key (override with keyFile).
+#
+# `name` stays relative on purpose: the loader resolves a relative name against
+# the directory of THIS patch file, so './lib/index.js' means <repo>/lib/index.js
+# when applied as a checkout overlay, and <pkg>/lib/index.js when the same file
+# ships inside the installed package as its dsh.bundle.patch layer.
 - insert:
     - id: tool-jev
       name: './lib/index.js'
