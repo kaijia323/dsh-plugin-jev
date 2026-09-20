@@ -3,9 +3,9 @@ spec:
   type: ops
   name: "把本轮改动提交并推送到公开仓库，且证明没有密钥/隐私随之上线"
   id: ops-public-push-privacy
-  version: 2
+  version: 3
   updated: "2026-09-20"
-  status: ready
+  status: done
   related:
     - "https://github.com/kaijia323/dsh-plugin-jev"
     - "reports/profile-switch-to-bundle.md"
@@ -36,6 +36,16 @@ spec:
         已改写为 `|` 交替 —— 审计员的独立口径才是本次证据；
     (i) 审计报告 reports/privacy-audit.md **刻意不发布**（保留在本机），因此提交后 `git status` 仍会有
         一个 `?? reports/privacy-audit.md`，这是预期状态而非遗漏。
+    (j) 完结（2026-09-20，v3，status: done）：bundle 提交 80db9ef（tree 298eff64…）已 fast-forward 推送到
+        origin/main，远端 SHA 与本地 HEAD 相等（`git ls-remote origin refs/heads/main` 实测一致）；独立审计
+        第四轮对公开侧匿名克隆复核为 CONFIRMED（历史未被改写、HEAD 无密钥材料）。随后追加一个 docs-only
+        提交，把本文件 status 由 ready 改为 done —— 该字段是纯人类可读元数据，全仓库无代码消费它，但另外
+        4 份已发布 SPEC 均为 done，保持一致性优先于「最小公开面」。
+    (k) v3 复核修正：判据 109 原写的裸 `sk-` / `apikey_` / `JEV_API_KEY=` 在 HEAD 上会产生良性命中
+        （`task-N` 的子串、README 的字面占位符 `'apikey_...'`、test/smoke.mjs 的测试假值
+        `'ts_from_jev_env'`、以及本 SPEC 模式名的自我引用；实测裸口径 23 条），故改写为带长度/形状限定的
+        可执行口径；审计报告已被本机 .git/info/exclude 的 `reports/privacy-audit*.md` 排除，故判据 107
+        记录的 `?? reports/privacy-audit.md` 残留已不再出现，而判据 107/111/114 也一并更新到两提交后的实际状态。
   assumptions:
     - "用户明确要求提交并推送（'提交推送'），因此 push 到 origin/main 属于已授权动作。"
     - "仓库为公开仓库是用户陈述；审计阶段用 HTTP 探活独立确认，若实为私有则该前提需更正。"
@@ -57,6 +67,7 @@ spec:
     - "提交 M README.md（方式四 + 四条迁移注意）、M dsh.patch.yml（相对 name 解析注释）、M package.json（dsh.bundle.patch 声明）。"
     - "提交新增 test/bundle-install.mjs（37 断言独立验证器）、reports/bundle-install-verification.md、reports/profile-switch-to-bundle.md、specs/feature-jev-bundle-install.yaml。"
     - "push 到 origin/main（要求 fast-forward）。"
+    - "v3 收尾（docs-only，仅本文件）：status: ready → done；把判据 109 的 token 模式改成可执行的真实凭据形状口径，并把判据 107 / 111 / 114 更新为两提交后的实际状态。"
 
   risks:
     - risk: "真实 API key 或凭据随提交上线（公开仓库，一旦推送可能被抓取）"
@@ -104,14 +115,15 @@ spec:
       action: "若 404/私有，先与用户确认前提再决定是否推送"
 
   acceptance_criteria:
-    - "正常：提交后 `git log --oneline -1` 显示新提交，`git status --porcelain` 只剩刻意不发布的本地审计报告 `?? reports/privacy-audit.md`（其余为空），且 `git rev-parse HEAD` 与 `git rev-parse origin/main` 相等。"
+    - "正常：提交后 `git log --oneline -1` 显示新提交，`git status --porcelain` 为空（v3 复核：本地审计报告已被 `.git/info/exclude` 的 `reports/privacy-audit*.md` 排除，v2 记录的 `?? reports/privacy-audit.md` 残留不再出现；在未带该 exclude 的克隆里复跑则应只剩这一个 `??`），且 `git rev-parse HEAD` 与 `git rev-parse origin/main` 相等。"
     - "正常：`git ls-remote origin refs/heads/main` 输出的 SHA 等于本地 HEAD（证明远端确实收到）。"
-    - "正常：对最终 HEAD 执行 `git grep -IF -f ~/.config/typesafe/key HEAD` 无输出；对 HEAD 的 token 模式扫描必须用正则交替 `TYPESAFE_API_KEY=|JEV_API_KEY=|apikey_|sk-|ghp_|gho_|AKIA|-----BEGIN [A-Z ]*PRIVATE KEY-----` 且 0 命中（注意：用 `/` 分隔会匹配拼接字面串造成假阴性，见审计发现 (h)）。"
+    - "正常：对最终 HEAD 执行 `git grep -IF -f ~/.config/typesafe/key HEAD` 无输出；token 模式扫描必须用正则交替（用 `/` 分隔会匹配拼接字面串造成假阴性，见审计发现 (h)）且真实凭据形状 0 命中。可执行口径：`git grep -InE 'TYPESAFE_API_KEY[[:space:]]*=[[:space:]]*[A-Za-z0-9_-]{16,}|JEV_API_KEY[[:space:]]*=[[:space:]]*[A-Za-z0-9_-]{16,}|apikey_[A-Za-z0-9]{16,}|sk-[A-Za-z0-9]{16,}|ghp_[A-Za-z0-9]{20,}|gho_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----|xox[baprs]-' HEAD` 无输出。判据只认「真实凭据形状」而非裸关键词：裸 `sk-` 会命中 `task-N`、裸 `apikey_` 会命中 README 的字面占位符 `'apikey_...'`、`JEV_API_KEY=` 会命中 test/smoke.mjs 的测试假值 `'ts_from_jev_env'`、模式名会命中本 SPEC 自身 —— 2026-09-20 实测不加长度/形状限定时 HEAD 有 23 条此类良性命中，逐条已在审计报告 §13.3 核对，全部非凭据。"
     - "边界：`git ls-files` 不含任何 *.key / *.pem / .env* / id_rsa* / *credential* 类文件；且 `git ls-files | git check-ignore --stdin` 输出为空（ignore 规则没有误伤已跟踪文件）。"
-    - "边界：`git show --stat HEAD` 的文件集合与预期 9 个路径完全一致（改：.gitignore、README.md、dsh.patch.yml、package.json；新增：test/bundle-install.mjs、reports/bundle-install-verification.md、reports/profile-switch-to-bundle.md、specs/feature-jev-bundle-install.yaml、specs/ops-public-push-privacy.yaml），不多不少。"
+    - "边界：bundle 提交 `80db9ef` 的 `git show --stat 80db9ef` 文件集合与预期 9 个路径完全一致（改：.gitignore、README.md、dsh.patch.yml、package.json；新增：test/bundle-install.mjs、reports/bundle-install-verification.md、reports/profile-switch-to-bundle.md、specs/feature-jev-bundle-install.yaml、specs/ops-public-push-privacy.yaml），不多不少；其后的 v3 docs-only 收尾提交只应包含本文件 1 个路径。"
     - "边界：对以下每类临时文件 `git check-ignore -v` 均能命中并给出 .gitignore 行号：foo.key、.env、cordis.patch.yml、x.tgz、y.log、z.before、node_modules/x、secrets.json、.npmrc；同时 `.env.example`、`README.md`、`dsh.patch.yml`、`lib/index.js` **不**被忽略。"
     - "边界（脱敏）：**本轮改动的 5 个文件**（README.md、reports/bundle-install-verification.md、reports/profile-switch-to-bundle.md、specs/feature-jev-bundle-install.yaml、specs/ops-public-push-privacy.yaml）的暂存内容里不含本机绝对路径前缀（形如 `/home/<user>/`），检查命令：`git grep --cached -nE '/home/[a-z]+/' -- <上述 5 个路径>` 无输出（用正则口径，判据文本里写的是 /home/<user>/，不会自匹配）；两份含引用输出的报告顶部含脱敏说明行。注意：未改动的历史文件（reports/final-verification.md 等）仍含此类路径，属既有公开内容、不在本轮范围。"
-    - "独立（重新签发）：提交前由 privacy-audit 对**修改后的最终 index** 重新出裁定，报告中给出它审计的 `git write-tree` 指纹，且该指纹与提交时的 index 一致；首轮 8b16bb33… 的裁定在 index 变更后失效。"
+    - "独立（重新签发）：每次 index 变更后，由非提交者对**修改后的最终 index** 重新出裁定，报告中给出它审计的 `git write-tree` 指纹，且该指纹与提交时的 index 一致。已归档指纹链：bundle 提交由审计员签发的 index `298eff64…` 与 `80db9ef` 的 tree 逐字节一致；v3 收尾的 index 由独立验证者重签（其报告为本机保留、不发布的 `reports/privacy-audit-v3.md`）；更早的 `8b16bb33…`、`3faa899b…` 裁定已在各自 index 变更后失效。"
+    - "元数据：本 SPEC `status: done`，且与其余 4 份已发布 SPEC 一致 —— `grep -n 'status:' specs/*.yaml` 五行全为 `done`。"
     - "失败：若 push 被拒（non-fast-forward / 认证失败），不得 force push；保留本地提交并报告远端 SHA、差异与确切错误。"
     - "失败：若任一扫描命中，立即停止提交/推送，报出命中位置并给出轮换步骤，绝不「先推再说」。"
     - "独立：隐私审计由非提交者执行，报告给出其自己的扫描方法、命令与原始输出；不得只复述 Lead 的结论。"
