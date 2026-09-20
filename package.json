@@ -11,8 +11,7 @@
   "files": [
     "lib",
     "README.md",
-    "dsh.patch.yml",
-    "dsh.vercel.patch.yml"
+    "dsh.patch.yml"
   ],
   "engines": {
     "node": ">=20.3"

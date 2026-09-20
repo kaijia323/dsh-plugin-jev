@@ -14,22 +14,22 @@ reverse. That trade is the whole point of the pattern.
 
 ## Where confidence lives
 
-The plugin returns the provider body verbatim, and the two transports report confidence
-differently:
+The plugin returns the provider body verbatim, and the official TypeSafe API reports
+confidence on the answer itself:
 
-    transport: typesafe (native API)
-        answers[key] = { type, choice|score|noul, probabilities, confidence }
+    answers[key] = { type, choice|score|noul, probabilities, confidence }
 
-    transport: vercel (AI Gateway)
-        answers[key] = { type, choice|score|probability, probabilities }   <- no confidence here
-        providerMetadata.typesafe.confidence[key]                          <- confidence here
-        rounding.probabilityDecimals = 2                                   <- probabilities are rounded
+choice answers carry .choice plus probabilities and a confidence; score answers carry
+.score plus a legend (or probabilities) and a confidence; a yes/no answer carries .noul
+(the probability that the answer is yes) and has no confidence field.
 
 Two consequences:
 
-1. On the Vercel transport, read providerMetadata.typesafe.confidence[key]; fall back to the top
-   probability (max of probabilities) when the provider omits it for a question.
-2. Probabilities are rounded to two decimals there, so do not set a threshold finer than 0.01.
+1. Read confidence from answers[key].confidence. When a question type has no confidence
+   field — the yes/no primitive — fall back to its probability: .noul, or the maximum of
+   .probabilities.
+2. Take the probabilities exactly as the provider reports them; do not assume any
+   particular rounding rule.
 
 ## Choosing thresholds
 
@@ -69,10 +69,9 @@ is designed to remove.
 - Do not use confidence as a quality score for a score-type answer; interpolated scores already
   carry their own uncertainty in the rungs.
 - Gate the risky action, not the whole task: routing a ticket is cheap, refunding money is not.
-- Free-tier Vercel credits are rate-limited on this model: a calibration sweep of many samples can
-  hit HTTP 429. Pace the calls (route-demo.mjs sleeps between samples) or top up to paid credits.
-- Rounding can flatten probabilities to 0/1 while confidence stays informative; prefer the
-  provider confidence over the rounded distribution when both exist.
+- The provider may rate-limit a key: a calibration sweep of many samples can hit HTTP 429. Pace
+  the calls (route-demo.mjs sleeps between samples) and treat the provider's actual responses as
+  authoritative; no quota is documented here.
 
 See examples/route-demo.mjs for a runnable implementation of the three lanes and a threshold
 sweep over a tiny labelled fixture.

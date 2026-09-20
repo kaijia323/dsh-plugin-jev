@@ -1,9 +1,9 @@
 /**
  * Smoke test for dsh-plugin-jev: registers the tool against a mock ctx and
- * executes it against mock TypeSafe and mock Vercel AI Gateway endpoints,
- * covering both transports, key resolution, validation, cancellation, response
- * envelopes, retries, and concurrency. No DSH process and no real API key
- * required.
+ * executes it against a mock official TypeSafe endpoint, covering the
+ * transport migration guard, key resolution, validation, cancellation,
+ * response envelopes, retries, and concurrency. No DSH process and no real API
+ * key required.
  *
  * Every request is recorded in `requestLog` (never a single last-request
  * global) so assertions stay correct under concurrent executes.
@@ -58,15 +58,6 @@ const CANNED = {
     urgent: { type: 'noul', noul: 0.999 },
   },
   usage: { input_tokens: 312, output_tokens: 48 },
-};
-
-const GATEWAY_CANNED = {
-  answers: {
-    dept: { type: 'choice', choice: 'billing', probabilities: { billing: 0.84, technical: 0.16 } },
-    passed: { type: 'boolean', probability: 0.01 },
-  },
-  usage: { inputTokens: 312, outputTokens: 48 },
-  warnings: [],
 };
 
 /** Per-request log: { url, method, headers, body }. */
@@ -137,10 +128,6 @@ const server = createServer((req, res) => {
       send(200, CANNED);
       return;
     }
-    if (req.method === 'POST' && req.url === '/gateway/evaluation-model') {
-      send(200, GATEWAY_CANNED);
-      return;
-    }
     send(404, 'not found');
   });
 });
@@ -148,9 +135,7 @@ await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
 const baseURL = 'http://127.0.0.1:' + server.address().port;
 
 const nativeRequests = () => requestLog.filter((entry) => entry.url === '/v1/systemone');
-const gatewayRequests = () => requestLog.filter((entry) => entry.url === '/gateway/evaluation-model');
 const lastNative = () => nativeRequests().at(-1) ?? { headers: {}, body: null };
-const lastGateway = () => gatewayRequests().at(-1) ?? { headers: {}, body: null };
 const callsWithState = (state) => nativeRequests().filter((entry) => entry.body && entry.body.state === state).length;
 
 function register(config) {
@@ -193,6 +178,23 @@ check('declares isConcurrencySafe true (F8)', typeof tool.isConcurrencySafe === 
 const rendered = tool.output.render({}, CANNED);
 check('render emits one text block', Array.isArray(rendered) && rendered.length === 1 && rendered[0].type === 'text');
 check('render text carries the answers', rendered[0].text.includes('"choice": "billing"'), rendered[0].text.slice(0, 80));
+check('description documents the noul answer field', tool.description.includes('answers[key].noul'), tool.description.slice(0, 120));
+check('description drops the retired .probability spelling', !tool.description.includes('.probability'), tool.description);
+check(
+  'description drops the retired AI Gateway wording',
+  !tool.description.toLowerCase().includes('ai gateway'),
+  tool.description.slice(0, 120),
+);
+check(
+  'question schema keeps the noul contract',
+  tool.parameters.properties.questions.description.includes('answers[key].noul'),
+  tool.parameters.properties.questions.description,
+);
+check(
+  'question schema drops the retired vendor model id',
+  !JSON.stringify(tool.parameters).includes('typesafe-ai/jev'),
+  JSON.stringify(tool.parameters).slice(0, 120),
+);
 
 // --- typesafe transport: happy path ---------------------------------------
 const questions = {
@@ -215,34 +217,49 @@ const defaultTool = register({ baseURL, apiKeyEnv: 'SMOKE_KEY' })[0];
 await defaultTool.execute({ state: 'x', questions: { q: { type: 'noul', instructions: 'y?' } } }, {});
 check('unconfigured model defaults to jev-latest', lastNative().body.model === 'jev-latest', String(lastNative().body && lastNative().body.model));
 
-// --- vercel transport -----------------------------------------------------
-process.env.GW_KEY = 'gw_smoke';
-const gatewayTools = register({
-  transport: 'vercel',
-  gatewayBaseURL: baseURL + '/gateway',
-  apiKeyEnv: 'GW_KEY',
-  timeoutMs: 5000,
-});
-check('vercel transport registers one tool', gatewayTools.length === 1);
-const gatewayTool = gatewayTools[0];
-const gatewayResult = await gatewayTool.execute(
-  {
-    state: 'The build failed with exit code 1.',
-    questions: {
-      dept: { type: 'choice', instructions: 'Which team?', criteria: { billing: 'payments', technical: 'bugs' } },
-      passed: { type: 'noul', instructions: 'Did the build succeed?' },
-    },
-  },
-  { signal: new AbortController().signal },
+// --- migration guard: the Vercel transport is gone ------------------------
+const retiredError = await captureError(() =>
+  register({
+    transport: 'vercel',
+    gatewayBaseURL: baseURL + '/gateway',
+    apiKeyEnv: 'GW_KEY',
+    timeoutMs: 5000,
+  }),
 );
-check('vercel returns the gateway body unchanged', JSON.stringify(gatewayResult) === JSON.stringify(GATEWAY_CANNED));
-check('vercel sends the gateway bearer token', lastGateway().headers.authorization === 'Bearer gw_smoke', String(lastGateway().headers.authorization));
-check('vercel defaults to the typesafe-ai/jev model', lastGateway().headers['ai-model-id'] === 'typesafe-ai/jev', String(lastGateway().headers['ai-model-id']));
-check('vercel sends the protocol version header', lastGateway().headers['ai-gateway-protocol-version'] === '0.0.1', String(lastGateway().headers['ai-gateway-protocol-version']));
-check('vercel sends the evaluation spec version header', lastGateway().headers['ai-evaluation-model-specification-version'] === '4', String(lastGateway().headers['ai-evaluation-model-specification-version']));
-check('vercel translates noul to boolean', lastGateway().body.questions.passed.type === 'boolean', JSON.stringify(lastGateway().body.questions));
-check('vercel keeps choice criteria', lastGateway().body.questions.dept.criteria.billing === 'payments');
-check('vercel body has no model field', lastGateway().body.model === undefined);
+const retiredMessage = retiredError ? retiredError.message : '<no error>';
+check('a retired transport is refused at registration', retiredError !== null, retiredMessage);
+check('the migration error says the transport was removed', retiredMessage.includes('removed'), retiredMessage);
+check('the migration error points at typesafe', retiredMessage.includes('typesafe'), retiredMessage);
+check(
+  'a retired transport is refused before any key lookup',
+  !retiredMessage.includes('no API key'),
+  retiredMessage,
+);
+check(
+  'the migration error never silently falls back',
+  retiredMessage.includes('got "vercel"') && retiredMessage.includes('only transport "typesafe"'),
+  retiredMessage,
+);
+const explicitTypesafe = register({ transport: 'typesafe', baseURL, apiKeyEnv: 'SMOKE_KEY', timeoutMs: 5000 });
+check(
+  'typesafe still registers after the guard',
+  explicitTypesafe.length === 1 && explicitTypesafe[0].name === 'jev_decide',
+  String(explicitTypesafe.length),
+);
+const defaultTransport = register({ baseURL, apiKeyEnv: 'SMOKE_KEY' });
+check(
+  'an absent transport still defaults to typesafe',
+  defaultTransport.length === 1 && defaultTransport[0].name === 'jev_decide',
+  String(defaultTransport.length),
+);
+
+// --- boolean alias normalizes to noul on the official wire ----------------
+await tool.execute({ state: 'x', questions: { q: { type: 'boolean', instructions: 'y?' } } }, {});
+check(
+  "normalizes a 'boolean' alias to 'noul' on the wire",
+  lastNative().body.questions.q.type === 'noul',
+  JSON.stringify(lastNative().body.questions),
+);
 
 // --- key resolution -------------------------------------------------------
 const dir = await mkdtemp(join(tmpdir(), 'jev-smoke-'));
@@ -265,18 +282,6 @@ await expectError(
   'reports a missing key with all sources',
   () => keylessTool.execute({ state: 'x', questions: { q: { type: 'noul', instructions: 'y?' } } }, {}),
   'no API key',
-);
-delete process.env.GW_KEY;
-const keylessGateway = register({
-  transport: 'vercel',
-  gatewayBaseURL: baseURL + '/gateway',
-  apiKeyEnv: 'NO_SUCH_ENV_VAR',
-  keyFile: '/nonexistent/key',
-})[0];
-await expectError(
-  'vercel reports a missing gateway key',
-  () => keylessGateway.execute({ state: 'x', questions: { q: { type: 'noul', instructions: 'y?' } } }, {}),
-  'AI Gateway key',
 );
 
 // --- validation and transport errors --------------------------------------
@@ -359,18 +364,32 @@ const legalScore = await tool.execute(
 check('accepts a legal score criteria array (D4)', JSON.stringify(legalScore) === JSON.stringify(CANNED));
 
 // --- D2: missing-key diagnostic de-duplication ----------------------------
-delete process.env.AI_GATEWAY_API_KEY;
-delete process.env.VERCEL_AI_GATEWAY_API_KEY;
-const defaultKeylessGateway = register({
-  transport: 'vercel',
-  gatewayBaseURL: baseURL + '/gateway',
-  keyFile: '/nonexistent/key',
-})[0];
-const missingKeyError = await captureError(() => defaultKeylessGateway.execute({ state: 'x', questions: yQuestion }, {}));
-const missingKeyMessage = missingKeyError ? missingKeyError.message : '<no error>';
-const aiGatewayMentions = missingKeyMessage.split('$AI_GATEWAY_API_KEY').length - 1;
-check('vercel default key message names $AI_GATEWAY_API_KEY exactly once (D2)', aiGatewayMentions === 1, missingKeyMessage);
-check('vercel default key message lists $VERCEL_AI_GATEWAY_API_KEY (D2)', missingKeyMessage.includes('$VERCEL_AI_GATEWAY_API_KEY'), missingKeyMessage);
+// Rebuilt on the official transport: the D2 regression is about the fallback
+// name colliding with apiKeyEnv, so it uses apiKeyEnv 'JEV_API_KEY', the same
+// name as the fallback, and proves the diagnostic names it exactly once.
+delete process.env.TYPESAFE_API_KEY;
+delete process.env.JEV_API_KEY;
+const defaultKeyless = register({ baseURL, keyFile: '/nonexistent/key' })[0];
+const defaultKeyError = await captureError(() => defaultKeyless.execute({ state: 'x', questions: yQuestion }, {}));
+const defaultKeyMessage = defaultKeyError ? defaultKeyError.message : '<no error>';
+check(
+  'official default key message lists $TYPESAFE_API_KEY and $JEV_API_KEY (D2)',
+  defaultKeyMessage.includes('$TYPESAFE_API_KEY') && defaultKeyMessage.includes('$JEV_API_KEY'),
+  defaultKeyMessage,
+);
+check(
+  'official default key message names each variable once (D2)',
+  defaultKeyMessage.split('$TYPESAFE_API_KEY').length - 1 === 1 && defaultKeyMessage.split('$JEV_API_KEY').length - 1 === 1,
+  defaultKeyMessage,
+);
+const fallbackNamedTool = register({ baseURL, apiKeyEnv: 'JEV_API_KEY', keyFile: '/nonexistent/key' })[0];
+const fallbackNamedError = await captureError(() => fallbackNamedTool.execute({ state: 'x', questions: yQuestion }, {}));
+const fallbackNamedMessage = fallbackNamedError ? fallbackNamedError.message : '<no error>';
+check(
+  'explicit apiKeyEnv equal to the fallback is named exactly once (D2)',
+  fallbackNamedMessage.split('$JEV_API_KEY').length - 1 === 1,
+  fallbackNamedMessage,
+);
 
 // --- D6: caller cancellation vs timeout -----------------------------------
 const preAborted = new AbortController();
@@ -414,10 +433,13 @@ await expectError(
   'HTTP 500',
 );
 check('retries:1 re-sends a 5xx once (F6)', callsWithState('HTTP500') === 2, String(callsWithState('HTTP500')));
-await expectError(
-  'a 429 is surfaced as an error (F6)',
-  () => retryTool.execute({ state: 'HTTP429', questions: yQuestion }, {}),
-  'HTTP 429',
+const rateLimitError = await captureError(() => retryTool.execute({ state: 'HTTP429', questions: yQuestion }, {}));
+const rateLimitMessage = rateLimitError ? rateLimitError.message : '<no error>';
+check('a 429 is surfaced as an error (F6)', rateLimitMessage.includes('HTTP 429'), rateLimitMessage);
+check(
+  'a 429 hint is provider-neutral and actionable (F6)',
+  rateLimitMessage.includes('rate-limiting this key') && !rateLimitMessage.toLowerCase().includes('ai gateway'),
+  rateLimitMessage,
 );
 check('a 429 is never retried (F6)', callsWithState('HTTP429') === 1, String(callsWithState('HTTP429')));
 const noRetryTool = register({ baseURL, apiKeyEnv: 'SMOKE_KEY', timeoutMs: 5000 })[0];

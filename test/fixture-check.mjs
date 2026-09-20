@@ -1,9 +1,9 @@
 /**
  * Fixture check for test/mock-typesafe.mjs: spawns the mock as a child process
- * on an ephemeral port with a temporary request log, posts one request to each
- * of its two routes, and asserts the sentinel answers plus the logged
- * authorization / ai-model-id headers. The mock is killed and the log removed
- * on every exit path.
+ * on an ephemeral port with a temporary request log, posts one request to its
+ * single official route, and asserts the sentinel answers plus the logged
+ * authorization header. The mock is killed and the log removed on every exit
+ * path.
  *
  * This is what makes mock-typesafe.mjs a tested fixture instead of dead code.
  *
@@ -21,7 +21,6 @@ const testDir = dirname(fileURLToPath(import.meta.url));
 const mockPath = join(testDir, 'mock-typesafe.mjs');
 const HARD_TIMEOUT_MS = 20000;
 const AUTH = 'Bearer fixture-check-key';
-const MODEL = 'fixture-check-model';
 
 let failures = 0;
 function check(label, condition, extra) {
@@ -45,7 +44,7 @@ async function freePort() {
 async function post(url, body) {
   return fetch(url, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', authorization: AUTH, 'ai-model-id': MODEL },
+    headers: { 'content-type': 'application/json', authorization: AUTH },
     body: JSON.stringify(body),
   });
 }
@@ -125,18 +124,6 @@ try {
       JSON.stringify(nativeBody?.answers?.dept),
     );
 
-    const gatewayResponse = await post(base + '/gateway/evaluation-model', {
-      state: 'fixture state',
-      questions: { dept: { type: 'choice', instructions: 'Which?', criteria: { a: 'b' } } },
-    });
-    const gatewayBody = await gatewayResponse.json();
-    check('gateway route answers HTTP 200', gatewayResponse.status === 200, String(gatewayResponse.status));
-    check(
-      'gateway route returns GATEWAY_SENTINEL',
-      gatewayBody?.answers?.dept?.choice === 'GATEWAY_SENTINEL',
-      JSON.stringify(gatewayBody?.answers?.dept),
-    );
-
     let log = '';
     try {
       log = await readFile(logPath, 'utf8');
@@ -154,20 +141,15 @@ try {
         }
       })
       .filter(Boolean);
-    check('mock logged exactly two requests', lines.length === 2, String(lines.length));
+    check('mock logged exactly one request', lines.length === 1, String(lines.length));
     check(
       'mock logged the authorization header',
-      lines.length === 2 && lines.every((line) => line.auth === AUTH),
+      lines.length === 1 && lines.every((line) => line.auth === AUTH),
       JSON.stringify(lines.map((line) => line.auth)),
     );
     check(
-      'mock logged the ai-model-id header',
-      lines.length === 2 && lines.every((line) => line.gatewayModel === MODEL),
-      JSON.stringify(lines.map((line) => line.gatewayModel)),
-    );
-    check(
-      'mock logged both routes',
-      lines.length === 2 && lines.some((line) => line.url === '/v1/systemone') && lines.some((line) => line.url === '/gateway/evaluation-model'),
+      'mock logged the native route',
+      lines.length === 1 && lines[0].url === '/v1/systemone',
       JSON.stringify(lines.map((line) => line.url)),
     );
   }

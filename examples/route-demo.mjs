@@ -1,22 +1,24 @@
 /**
- * Runnable confidence-gated routing demo for Jev via Vercel AI Gateway.
+ * Runnable confidence-gated routing demo for Jev via the official TypeSafe API.
  *
  * Usage:
  *   node examples/route-demo.mjs                      # route a few built-in states
  *   node examples/route-demo.mjs "state text"         # route one custom state
  *   node examples/route-demo.mjs --calibrate          # sweep thresholds over a small fixture
  *
- * Reads the AI Gateway key from AI_GATEWAY_KEY_FILE, defaulting to
- * ~/.config/vercel/ai-gateway-key. Jev input is $0.04 per million tokens and output is free,
- * but free-tier credits are rate-limited: 429 responses are retried with backoff here.
+ * Reads the TypeSafe key from TYPESAFE_KEY_FILE, defaulting to
+ * ~/.config/typesafe/key, and calls POST https://api.typesafe.ai/v1/systemone with
+ * {state, questions, model}. The key is only read from that file and is never printed.
+ * Pricing is deliberately not hard-coded: check TypeSafe's current terms before a large
+ * sweep, and keep the delay between calls so the provider is not rate-limited.
  */
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
-const ENDPOINT = process.env.JEV_ENDPOINT || 'https://ai-gateway.vercel.sh/v4/ai/evaluation-model';
-const MODEL = process.env.JEV_MODEL || 'typesafe-ai/jev';
-const KEY_FILE = process.env.AI_GATEWAY_KEY_FILE || join(homedir(), '.config', 'vercel', 'ai-gateway-key');
+const ENDPOINT = process.env.JEV_ENDPOINT || 'https://api.typesafe.ai/v1/systemone';
+const MODEL = process.env.JEV_MODEL || 'jev-latest';
+const KEY_FILE = process.env.TYPESAFE_KEY_FILE || join(homedir(), '.config', 'typesafe', 'key');
 
 /** The policy. Keep these in one reviewable place. */
 const POLICY = {
@@ -38,10 +40,10 @@ const QUESTIONS = {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-/** Free-tier credits are rate-limited, so the sweep paces itself between samples. */
+/** Pace calls between samples so the provider's rate limits are not hit. */
 const SAMPLE_DELAY_MS = Number(process.env.JEV_SAMPLE_DELAY_MS || 4000);
 
-/** Load the gateway key from the configured key file. */
+/** Load the TypeSafe key from the configured key file. */
 async function apiKey() {
   const key = (await readFile(KEY_FILE, 'utf8')).trim();
   if (key === '') throw new Error('empty key file: ' + KEY_FILE);
@@ -50,10 +52,10 @@ async function apiKey() {
 
 /**
  * One Jev call: state plus typed questions, structured answers back.
- * Retries 429 (free-tier rate limit) and 5xx with linear backoff.
+ * Retries 429 (provider rate limit) and 5xx with exponential backoff.
  * @param {string} state - the shared state to judge.
  * @param {object} questions - typed question map.
- * @returns {Promise<object>} the gateway response body.
+ * @returns {Promise<object>} the provider response body.
  */
 async function decide(state, questions) {
   const key = await apiKey();
@@ -63,22 +65,19 @@ async function decide(state, questions) {
       headers: {
         'content-type': 'application/json',
         authorization: 'Bearer ' + key,
-        'ai-gateway-protocol-version': '0.0.1',
-        'ai-evaluation-model-specification-version': '4',
-        'ai-model-id': MODEL,
       },
-      body: JSON.stringify({ state, questions }),
+      body: JSON.stringify({ state, questions, model: MODEL }),
     });
     const body = await response.json();
     if (response.ok) return body;
     if ((response.status === 429 || response.status >= 500) && attempt < 4) {
       const waitMs = 8000 * Math.pow(2, attempt - 1);
-      console.log('   [' + response.status + '] rate-limited or upstream busy, retrying in ' + (waitMs / 1000) + 's (attempt ' + attempt + '/3)');
+      console.log('   [' + response.status + '] provider is rate-limiting or upstream is busy, retrying in ' + (waitMs / 1000) + 's (attempt ' + attempt + '/3)');
       await sleep(waitMs);
       continue;
     }
     if (response.status === 429) {
-      throw new Error('Jev call failed: HTTP 429 free-tier rate limit. ' + JSON.stringify(body.error));
+      throw new Error('Jev call failed: HTTP 429 (the provider is rate-limiting this key): ' + JSON.stringify(body));
     }
     throw new Error('Jev call failed: HTTP ' + response.status + ' ' + JSON.stringify(body));
   }
@@ -86,24 +85,19 @@ async function decide(state, questions) {
 }
 
 /**
- * Read the calibrated confidence for one answer. The native TypeSafe transport puts it on the
- * answer; the Vercel transport puts it under providerMetadata.typesafe.confidence and leaves the
- * answer with probabilities only, so fall back to the top probability.
+ * Read the calibrated confidence for one answer. The official API reports it on the
+ * answer itself, as answers[key].confidence. A yes/no answer carries no confidence
+ * field: its noul value is the probability that the answer is yes.
  * @param {object} body - provider response body.
  * @param {string} key - question key.
- * @returns {number} confidence in [0, 1].
+ * @returns {number} confidence (or yes-probability) in [0, 1].
  */
 function confidenceOf(body, key) {
-  const metadata = body.providerMetadata || {};
-  const typesafe = metadata.typesafe || {};
-  const perKey = typesafe.confidence || {};
-  if (typeof perKey[key] === 'number') return perKey[key];
   const answer = (body.answers || {})[key] || {};
-  if (typeof answer.probability === 'number') return answer.probability;
-  if (answer.probabilities) {
-    const values = Object.values(answer.probabilities);
-    if (values.length > 0) return Math.max.apply(null, values);
-  }
+  if (typeof answer.confidence === 'number') return answer.confidence;
+  if (typeof answer.noul === 'number') return answer.noul;
+  const values = Object.values(answer.probabilities || {});
+  if (values.length > 0) return Math.max.apply(null, values);
   return 0;
 }
 
@@ -124,11 +118,10 @@ async function routeOne(state) {
   const answer = body.answers.dept;
   const confidence = confidenceOf(body, 'dept');
   const chosen = lane(confidence);
-  const hasCalibrated = typeof ((body.providerMetadata || {}).typesafe || {}).confidence === 'object'
-    && typeof (((body.providerMetadata || {}).typesafe || {}).confidence || {}).dept === 'number';
+  const hasCalibrated = typeof answer.confidence === 'number';
   console.log('state      : ' + state.slice(0, 72));
   console.log('choice     : ' + answer.choice + '  probabilities=' + JSON.stringify(answer.probabilities));
-  console.log('confidence : ' + confidence.toFixed(2) + (hasCalibrated ? '  (provider confidence)' : '  (fallback: top probability)'));
+  console.log('confidence : ' + confidence.toFixed(2) + (hasCalibrated ? '  (answers.dept.confidence)' : '  (fallback: top probability)'));
   console.log('lane       : ' + chosen + (chosen === 'auto'
     ? '  -> execute: ' + answer.choice
     : chosen === 'review'
@@ -186,6 +179,7 @@ if (args[0] === '--calibrate') {
   await routeOne(args.join(' '));
 } else {
   await routeOne('My card was charged twice for one order. Please refund the extra charge.');
+  await sleep(SAMPLE_DELAY_MS);
   await routeOne('Something is broken but I cannot tell you what, it just feels off lately.');
   console.log('policy: auto >= ' + POLICY.auto + ', review >= ' + POLICY.review + ' (override with JEV_AUTO_THRESHOLD / JEV_REVIEW_THRESHOLD)');
 }
